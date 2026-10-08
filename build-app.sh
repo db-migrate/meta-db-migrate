@@ -57,6 +57,15 @@ for source in "$app"/*.c "$app"/migrations/*.c; do
   objects="$objects $work/$name.o"
 done
 
+# migrations written as SQL go in as C string literals, so the program still
+# needs nothing beside it
+if [ -d "$app/migrations/sqls" ]; then
+  "$here/build/meta-migrate" embed-sql "$app/migrations" "$work/embedded-sql.c"
+  $cc $flags -I "$here/include" -I "$root/runtime/include" \
+      -c "$work/embedded-sql.c" -o "$work/embedded-sql.o"
+  objects="$objects $work/embedded-sql.o"
+fi
+
 archives=""
 libraries=""
 

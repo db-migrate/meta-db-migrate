@@ -290,10 +290,170 @@ static bool listAll(const char *dir) {
   }
 
   closedir(listing);
+
+  /* and the ones written as SQL, where `create --sql-file` puts them */
+  char sqls[1024];
+
+  dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
+  listing = opendir(sqls);
+
+  if (listing == NULL)
+    return true;
+
+  for (struct dirent *entry = readdir(listing); entry != NULL;
+       entry = readdir(listing)) {
+
+    size_t length = strlen(entry->d_name);
+    char path[1100];
+
+    if (length < 8 || strcmp(entry->d_name + length - 7, "-up.sql") != 0)
+      continue;
+
+    dbmWrite(path, sizeof path, TEXT`${sqls}/${entry->d_name}`);
+    dbmRegisterLazily(path, dbmLoadSqlFiles);
+  }
+
+  closedir(listing);
   return true;
 }
 
+/** A file's bytes as the inside of a C string literal, a line per line. */
+static void literal(FILE *out, const char *text) {
+
+  fputs("\"", out);
+
+  for (const unsigned char *at = (const unsigned char *)text; *at != 0; ++at) {
+
+    switch (*at) {
+    case '\\':
+      fputs("\\\\", out);
+      break;
+    case '"':
+      fputs("\\\"", out);
+      break;
+    case '\n':
+      fputs("\\n\"\n    \"", out);
+      break;
+    case '\t':
+      fputs("\\t", out);
+      break;
+    case '\r':
+      fputs("\\r", out);
+      break;
+    default:
+
+      if (*at < 0x20 || *at == 0x7f)
+        dbmSay(out, TEXT`\\${zeroed(octal(*at), 3)}`);
+      else
+        fputc(*at, out);
+    }
+  }
+
+  fputs("\"", out);
+}
+
+/** A whole file, or NULL. The caller frees it. */
+static char *slurp(const char *path) {
+
+  FILE *file = fopen(path, "rb");
+  char *text = NULL;
+  long length;
+
+  if (file == NULL)
+    return NULL;
+
+  if (fseek(file, 0, SEEK_END) == 0 && (length = ftell(file)) >= 0 &&
+      fseek(file, 0, SEEK_SET) == 0 && (text = malloc((size_t)length + 1))) {
+
+    size_t got = fread(text, 1, (size_t)length, file);
+
+    text[got] = '\0';
+  }
+
+  fclose(file);
+  return text;
+}
+
+/**
+ * `meta-migrate embed-sql <migrations> <out.c>`: the SQL migrations as C, so
+ * a program that ships them is still one file. build-app.sh calls it.
+ *
+ * The output is plain C for the C compiler - string literals and one
+ * constructor registering them - so it needs no lowering and has no runtime
+ * dependency on the directory it was made from.
+ */
+static int embedSql(const char *dir, const char *into) {
+
+  char sqls[1024];
+  FILE *out = fopen(into, "w");
+
+  if (out == NULL) {
+    perror(into);
+    return 1;
+  }
+
+  dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
+
+  fputs("/* written by meta-migrate embed-sql; do not edit */\n"
+        "#include <db_migrate.h>\n\n"
+        "__attribute__((constructor)) static void dbmEmbeddedSql(void) {\n",
+        out);
+
+  DIR *listing = opendir(sqls);
+
+  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
+       entry != NULL; entry = readdir(listing)) {
+
+    size_t length = strlen(entry->d_name);
+    char up[1100];
+    char down[1100];
+
+    if (length < 8 || strcmp(entry->d_name + length - 7, "-up.sql") != 0)
+      continue;
+
+    dbmWrite(up, sizeof up, TEXT`${sqls}/${entry->d_name}`);
+    dbmWrite(down, sizeof down, TEXT`${up}`);
+    dbmWrite(down + strlen(up) - 7, sizeof down - (strlen(up) - 7),
+             TEXT`-down.sql`);
+
+    char *upText = slurp(up);
+    char *downText = slurp(down);
+
+    if (upText == NULL) {
+      dbmSay(stderr, TEXT`[ERROR] cannot read ${up}\n`);
+      fclose(out);
+      closedir(listing);
+      free(downText);
+      return 1;
+    }
+
+    dbmSay(out, TEXT`  dbmRegisterSql("${entry->d_name}",\n    `);
+    literal(out, upText);
+    fputs(",\n    ", out);
+
+    if (downText != NULL)
+      literal(out, downText);
+    else
+      fputs("0", out);
+
+    fputs(");\n", out);
+    free(upText);
+    free(downText);
+  }
+
+  if (listing != NULL)
+    closedir(listing);
+
+  fputs("}\n", out);
+  fclose(out);
+  return 0;
+}
+
 int main(int argc, char **argv) {
+
+  if (argc == 4 && strcmp(argv[1], "embed-sql") == 0)
+    return embedSql(argv[2], argv[3]);
+
 
   const char *dir = "migrations";
   bool creating = false;
