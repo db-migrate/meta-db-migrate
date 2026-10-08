@@ -288,7 +288,8 @@ void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
   migrations.push(entry);
 }
 
-void dbmRegisterV2(const char *file, dbm_v2_t migrate) {
+void dbmRegisterV2Recovering(const char *file, dbm_v2_t migrate,
+                             const char *recovery) {
 
   dbm_migration_t entry;
 
@@ -301,11 +302,17 @@ void dbmRegisterV2(const char *file, dbm_v2_t migrate) {
 
   if (known != NULL) {
     known->migrate = migrate;
+    known->recovery = recovery;
     return;
   }
 
   entry.migrate = migrate;
+  entry.recovery = recovery;
   migrations.push(entry);
+}
+
+void dbmRegisterV2(const char *file, dbm_v2_t migrate) {
+  dbmRegisterV2Recovering(file, migrate, NULL);
 }
 
 void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {

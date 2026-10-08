@@ -820,6 +820,9 @@ int dbmBaseCreateTable(driver_t *self, const char *table, json_t spec) {
   if (dbmSend(self, &sql))
     return -1;
 
+  /* the table is there now, whatever its keys do next */
+  self->signaled = true;
+
   /* said inside the columns already, where the database wanted them */
   if (self->inlineForeignKeys)
     return 0;
@@ -876,6 +879,9 @@ int dbmBaseAddColumn(driver_t *self, const char *table, const char *column,
   if (self->columnDef(self, &sql, table, column, spec, &options) ||
       dbmSend(self, &sql))
     return -1;
+
+  /* the column is there now, whatever its key does next */
+  self->signaled = true;
 
   if (!self->inlineForeignKeys &&
       strcmp(spec.foreignKey.kind(), "object") == 0)

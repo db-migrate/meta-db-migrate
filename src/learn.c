@@ -15,8 +15,14 @@
  *
  * `down` runs the list backwards, learning each step the other way round
  * without recording it. So does a migration that fails halfway, which has no
- * transaction around it - its rollback is this. The step that failed is left
- * out of that, since it never happened.
+ * transaction around it - its rollback is this, by exactly the steps that
+ * reached the database: each undo step carries the step it undoes (`n`), and
+ * the lock row says which step was sent last (`done`).
+ *
+ * A run that dies halfway leaves the lock row saying which migration it was
+ * and how far it got - started, learned, done - and the next run resumes it,
+ * as node does since 1.0.0-beta.38: skipping what was done, or rolling it back
+ * and starting over, as the migration says.
  *
  * Where node's learn has a bug the database would feel, this does what node
  * meant rather than what it does - the records stay node's shape either way:
@@ -70,7 +76,14 @@ struct schema_t {
   /** Whether the last step recorded was also sent, for a rollback to know. */
   bool sent;
 
+  /** The step counted last - node's op - and the last one sent. */
   int counter;
+  int done;
+
+  /** An interrupted run being resumed: what of it is done already. */
+  const dbm_interrupted_t *recovery;
+  const char *name;
+
   bool failed;
   char error[512];
 };
@@ -206,6 +219,11 @@ static void record(schema_t *self, int type, dbm_action_t action,
   yyjson_mut_obj_add_int(doc, entry, "t", type);
   yyjson_mut_obj_add_str(doc, entry, "a", spellingof(enum dbmAction, action));
   yyjson_mut_obj_add_val(doc, entry, "c", args);
+
+  /* the step it undoes, so a rollback knows which ran - node's tag, which
+     its fix does not set */
+  if (!self->fixing)
+    yyjson_mut_obj_add_int(doc, entry, "n", self->counter);
   yyjson_mut_arr_append(steps, entry);
 }
 
@@ -707,6 +725,29 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
  * again with its undo step in it, and only then sent - node's order, so a
  * process that dies at any point leaves a record that says how far it got.
  */
+/** A field of the lock row set to a step - "learned", "done" - unless dry. */
+static int mark(schema_t *self, const char *field, int op) {
+
+  char changes[64];
+
+  if (self->dry)
+    return 0;
+
+  dbmWrite(changes, sizeof changes, TEXT`{"${field}":${(long)op}}`);
+
+  if (dbmStateMark(self->state, changes))
+    return fail(self, TEXT`could not write the state: ${self->state->db->error}`);
+
+  return 0;
+}
+
+/** A step for the log, as node writes it: addColumn("pets", "age"). */
+static void described(dbm_action_t action, const step_t *step, char *into,
+                      size_t room) {
+  dbmWrite(into, room,
+           TEXT`${spellingof(enum dbmAction, action)}("${step->table != NULL ? step->table : ""}"${step->name != NULL ? ", \"" : ""}${step->name != NULL ? step->name : ""}${step->name != NULL ? "\"" : ""})`);
+}
+
 static int perform(schema_t *self, dbm_action_t action, step_t *step) {
 
   if (self->failed)
@@ -716,16 +757,41 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
   if (self->fixing)
     return learn(self, action, step) || travel(self) ? -1 : 0;
 
-  if (travel(self) || learn(self, action, step) || save(self))
+  int op = self->counter + 1;
+  const dbm_interrupted_t *recovery = self->recovery;
+  char what[600];
+
+  described(action, step, what, sizeof what);
+
+  /* resuming: what the interrupted run did is in the database and the state */
+  if (recovery != NULL && op <= recovery->done) {
+    self->counter = op;
+    self->done = op;
+    dbmSay(stdout, TEXT`[INFO] [recovery] ${self->name}: skipping already executed step ${(long)op}/${recovery->done} ${what}\n`);
+    return 0;
+  }
+
+  /* its undoing was recorded, but it never finished on the database */
+  bool learned = recovery != NULL && op <= recovery->learned;
+
+  if (learned)
+    dbmSay(stdout, TEXT`[INFO] [recovery] ${self->name}: executing interrupted step ${(long)op} ${what} without learning it again\n`);
+
+  if (travel(self) || (!learned && learn(self, action, step)) || save(self) ||
+      mark(self, "learned", op))
     return -1;
 
   self->sent = false;
+  self->driver->signaled = false;
 
   if (send(self, action, step))
     return -1;
 
   self->sent = true;
-  return 0;
+
+  /* in memory first: a failing write must not hide that the step ran */
+  self->done = op;
+  return mark(self, "done", op);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1046,22 +1112,15 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
 /**
  * The record's steps backwards, each taken off the end and the state written
  * after it, so an undoing that is interrupted can be carried on from where it
- * stopped. `skipLast` leaves out the newest one: a step that was recorded and
- * then failed to send, which there is nothing to undo of.
+ * stopped. Which steps are in it is the caller's: keepExecuted leaves out
+ * those that never reached the database.
  */
-static int undoAll(schema_t *self, bool skipLast) {
+static int undoAll(schema_t *self) {
 
   yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
   bool unlearn = self->unlearn;
 
   self->unlearn = true;
-
-  if (skipLast && yyjson_mut_arr_size(steps) > 0) {
-    yyjson_mut_arr_remove_last(steps);
-
-    if (save(self))
-      return -1;
-  }
 
   while (yyjson_mut_arr_size(steps) > 0) {
 
@@ -1120,18 +1179,113 @@ static yyjson_mut_doc *recordFrom(const char *text) {
   return doc;
 }
 
+/** The step an undo entry belongs to: `n`, or 0 for one an older run wrote. */
+static long stepOf(yyjson_mut_val *entry) {
+
+  yyjson_mut_val *n = yyjson_mut_obj_get(entry, "n");
+
+  return n != NULL && yyjson_mut_is_int(n) ? (long)yyjson_mut_get_sint(n) : 0;
+}
+
+/**
+ * The undo entries of the steps that changed the database, the rest let go:
+ * every step up to `done`, and `failed` as well if its main statement went
+ * through before it failed (`signaled`). node's executedSteps.
+ */
+static void keepExecuted(schema_t *self, long done, long failed,
+                         bool signaled) {
+
+  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
+  size_t at = 0;
+
+  while (at < yyjson_mut_arr_size(steps)) {
+
+    long n = stepOf(yyjson_mut_arr_get(steps, at));
+
+    if (n <= done || (signaled && failed > done && n == failed))
+      ++at;
+    else
+      yyjson_mut_arr_remove(steps, at);
+  }
+}
+
+/** The file a migration was written in, hashed - node's `h` - or NULL. */
+static const char *hashOf(const dbm_migration_t *migration, char hex[65]) {
+  return migration->file[0] != '\0' && dbmSha256File(migration->file, hex)
+             ? hex
+             : NULL;
+}
+
+/**
+ * How an interrupted run is resumed: the migration's own say, "skip" when it
+ * says nothing - but a run interrupted while rolling back is rolled back
+ * further, and steps of a file that changed since are not skipped blind.
+ * NULL, with the reason, when it cannot be.
+ */
+static const char *recoveryOf(const dbm_migration_t *migration,
+                              const dbm_interrupted_t *interrupted, char *why,
+                              size_t room) {
+
+  const char *name = keyOf(migration->name);
+  const char *mode = migration->recovery != NULL ? migration->recovery : "skip";
+
+  if (!(mode in {"skip", "rollback"})) {
+    dbmWrite(why, room, TEXT`Invalid recovery mode "${mode}" in migration "${name}", use one of skip, rollback`);
+    return NULL;
+  }
+
+  if (interrupted->rollback) {
+
+    if (strcmp(mode, "rollback") != 0)
+      dbmSay(stderr, TEXT`[WARN] [recovery] ${name}: the previous run was interrupted while rolling back, continuing the rollback\n`);
+
+    return "rollback";
+  }
+
+  if (strcmp(mode, "skip") == 0 && interrupted->changed) {
+    dbmWrite(why, room, TEXT`Migration "${name}" was interrupted at step ${interrupted->step} and changed since, so the executed steps can not be skipped safely. Use DBM_MIGRATION_V2_RECOVERY(migrate, "rollback") to revert them, or repair the state manually.`);
+    return NULL;
+  }
+
+  return mode;
+}
+
+/** Undo what is left in the record, as a rollback does, and end the run. */
+static int rollBack(schema_t *self) {
+
+  if (save(self) || mark(self, "rb", 1))
+    return -1;
+
+  self->failed = false;
+
+  if (undoAll(self))
+    return -1;
+
+  if (!self->dry && (dbmStateForget(self->state, self->key) ||
+                     dbmStateProgress(self->state, -1, 1)))
+    return fail(self, TEXT`could not write the state: ${self->state->db->error}`);
+
+  return 0;
+}
+
 /**
  * A v2 migration up: its record begun, its steps run and learned, and on a
  * failure everything it did so far undone from that record - there is no
- * transaction to roll back. Answers 0 when it ran; the reason for anything
- * else is in `why`.
+ * transaction to roll back. A run a previous one left unfinished is resumed
+ * first, the way the migration says. Answers 0 when it ran; the reason for
+ * anything else is in `why`.
  */
-int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
-            dbm_v2_t migrate, char *why, size_t room) {
+int dbmUpV2(driver_t *driver, dbm_state_t *state,
+            const dbm_migration_t *migration, char *why, size_t room) {
 
+  const char *name = migration->name;
   schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun};
-  char *stored = db.dry ? NULL : dbmStateBegin(state, db.key);
+                 .dry = driver->dryRun, .name = keyOf(name)};
+  dbm_interrupted_t interrupted = {0};
+  char hex[65];
+  const char *hash = hashOf(migration, hex);
+  char *stored = db.dry ? NULL
+                        : dbmStateBegin(state, db.key, "up", hash, &interrupted);
 
   if (!db.dry && stored == NULL) {
     dbmWrite(why, room, TEXT`could not begin the state of ${name}: ${state->db->error}`);
@@ -1141,7 +1295,44 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
   db.record = recordFrom(stored);
   free(stored);
 
-  int answer = migrate(&db);
+  if (interrupted.found) {
+
+    const char *mode = recoveryOf(migration, &interrupted, why, room);
+
+    if (mode == NULL) {
+      yyjson_mut_doc_free(db.record);
+      return -1;
+    }
+
+    dbmSay(stderr, TEXT`[WARN] [recovery] ${db.key}: the previous run was interrupted at step ${interrupted.step}, ${interrupted.done} steps were executed, recovering by ${mode}\n`);
+
+    if (strcmp(mode, "rollback") == 0) {
+
+      /* a step started but not done did not change the database */
+      keepExecuted(&db, interrupted.done, 0, false);
+
+      if (rollBack(&db)) {
+        dbmWrite(why, room, TEXT`could not roll back the interrupted run: ${db.error}`);
+        yyjson_mut_doc_free(db.record);
+        return -1;
+      }
+
+      yyjson_mut_doc_free(db.record);
+      stored = dbmStateBegin(state, db.key, "up", hash, NULL);
+
+      if (stored == NULL) {
+        dbmWrite(why, room, TEXT`could not begin the state of ${name}: ${state->db->error}`);
+        return -1;
+      }
+
+      db.record = recordFrom(stored);
+      free(stored);
+    } else {
+      db.recovery = &interrupted;
+    }
+  }
+
+  int answer = migration->migrate(&db);
 
   if (answer != 0 && !db.failed)
     fail(&db, TEXT`the migration answered non-zero without saying why`);
@@ -1151,17 +1342,13 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
     char reason[512];
 
     dbmWrite(reason, sizeof reason, TEXT`${db.error}`);
-    dbmSay(stderr, TEXT`[ERROR] An error occured. Rolling back ${keyOf(name)}: ${reason}\n`);
+    dbmSay(stderr, TEXT`[ERROR] Migration "${db.key}" failed at step ${(long)db.counter}, rolling back: ${reason}\n`);
 
-    db.failed = false;
+    /* the steps that ran, and the failed one if its table or column is there */
+    keepExecuted(&db, db.done, db.counter, !db.sent && driver->signaled);
 
-    if (undoAll(&db, !db.sent))
+    if (rollBack(&db))
       dbmSay(stderr, TEXT`[ERROR] and undoing it failed too: ${db.error}\n`);
-
-    if (!db.dry) {
-      dbmStateForget(state, db.key);
-      dbmStateProgress(state, -1, 1);
-    }
 
     dbmWrite(why, room, TEXT`${reason}`);
     yyjson_mut_doc_free(db.record);
@@ -1178,15 +1365,18 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
  * there. node appends the new steps to the record it finds; this starts the
  * record over, which is what rebuilding it means.
  */
-int dbmFixV2(driver_t *driver, dbm_state_t *state, const char *name,
-             dbm_v2_t migrate, char *why, size_t room) {
+int dbmFixV2(driver_t *driver, dbm_state_t *state,
+             const dbm_migration_t *migration, char *why, size_t room) {
 
+  const char *name = migration->name;
   schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun, .fixing = true};
+                 .dry = driver->dryRun, .fixing = true, .name = keyOf(name)};
 
   if (!db.dry) {
 
-    char *stored = dbmStateBegin(state, db.key);
+    char hex[65];
+    char *stored = dbmStateBegin(state, db.key, "fix", hashOf(migration, hex),
+                                 NULL);
 
     if (stored == NULL) {
       dbmWrite(why, room, TEXT`could not begin the state of ${name}: ${state->db->error}`);
@@ -1198,7 +1388,7 @@ int dbmFixV2(driver_t *driver, dbm_state_t *state, const char *name,
 
   db.record = recordFrom(NULL);
 
-  int answer = migrate(&db);
+  int answer = migration->migrate(&db);
 
   if (answer != 0 && !db.failed)
     fail(&db, TEXT`the migration answered non-zero without saying why`);
@@ -1219,11 +1409,12 @@ int dbmEndV2(dbm_state_t *state, bool dry) {
 }
 
 /** A v2 migration down: its record run backwards, then forgotten. */
-int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
-              char *why, size_t room) {
+int dbmDownV2(driver_t *driver, dbm_state_t *state,
+              const dbm_migration_t *migration, char *why, size_t room) {
 
+  const char *name = migration->name;
   schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun, .unlearn = true};
+                 .dry = driver->dryRun, .unlearn = true, .name = keyOf(name)};
   char *stored = NULL;
 
   if (dbmKvGet(state->db, state->table, db.key, &stored)) {
@@ -1240,16 +1431,26 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
     return -1;
   }
 
-  if (!db.dry && dbmStateProgress(state, 0, 0)) {
-    free(stored);
-    dbmWrite(why, room, TEXT`${state->db->error}`);
-    return -1;
+  /* the lock row says which migration goes down, as node's does */
+  if (!db.dry) {
+
+    char hex[65];
+    char *begun = dbmStateBegin(state, db.key, "down", hashOf(migration, hex),
+                                NULL);
+
+    if (begun == NULL) {
+      free(stored);
+      dbmWrite(why, room, TEXT`${state->db->error}`);
+      return -1;
+    }
+
+    free(begun);
   }
 
   db.record = recordFrom(stored);
   free(stored);
 
-  int answer = undoAll(&db, false);
+  int answer = undoAll(&db);
 
   if (answer == 0 && !db.dry)
     answer = dbmStateForget(state, db.key) || dbmStateProgress(state, -1, 1);

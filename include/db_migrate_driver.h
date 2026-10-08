@@ -61,6 +61,14 @@ struct driver_t {
   bool ignoreOnInit;
 
   /**
+   * Set by createTable and addColumn once their main statement went through,
+   * before the foreign keys that follow it - node's driver signal. A v2
+   * migration failing at that step then knows the table or column is there
+   * and has to be undone. Cleared before every v2 step.
+   */
+  bool signaled;
+
+  /**
    * Whether `removeColumn` may be given a recreation strategy for a NOT NULL
    * column - node's `_meta.supports.columnStrategies`.
    */
@@ -332,17 +340,46 @@ int dbmStateReloadSchema(dbm_state_t *self);
 /** How far the running migration got: -1 leaves a field as it is. */
 int dbmStateProgress(dbm_state_t *self, int step, int fin);
 
-/** One v2 migration's own record - `{i, c, f, s}` - as a JSON text the caller frees. */
-char *dbmStateBegin(dbm_state_t *self, const char *key);
+/**
+ * Fields of the lock row set, as a JSON object - `{"done":3}` - and every
+ * other field left as it is, node's included.
+ */
+int dbmStateMark(dbm_state_t *self, const char *changes);
+
+/**
+ * A v2 migration that a previous run left unfinished, as the lock row says:
+ * the last step started, the last whose undoing was recorded, the last sent
+ * to the database, whether it was rolling back, and whether its file changed
+ * since. node's startMigration with `recover`.
+ */
+typedef struct {
+  bool found;
+  long step;
+  long learned;
+  long done;
+  bool rollback;
+  bool changed;
+} dbm_interrupted_t;
+
+/**
+ * Starting a v2 migration: its record - `{i, c, f, s}`, made if there is
+ * none - as a JSON text the caller frees, and the lock row saying which
+ * migration runs which way (`op`: "up", "down", "fix") from step 0, with
+ * its file's hash or NULL. With `interrupted`, an unfinished "up" of the
+ * same migration is not started over but described there, for the caller to
+ * resume; an unfinished other one is said and left.
+ */
+char *dbmStateBegin(dbm_state_t *self, const char *key, const char *op,
+                    const char *hash, dbm_interrupted_t *interrupted);
 int dbmStateSave(dbm_state_t *self, const char *key, const char *migration);
 int dbmStateForget(dbm_state_t *self, const char *key);
 
 /** v2 migrations, learned and undone the way node does it. */
-int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
-            dbm_v2_t migrate, char *why, size_t room);
+int dbmUpV2(driver_t *driver, dbm_state_t *state,
+            const dbm_migration_t *migration, char *why, size_t room);
 int dbmEndV2(dbm_state_t *state, bool dry);
-int dbmFixV2(driver_t *driver, dbm_state_t *state, const char *name,
-             dbm_v2_t migrate, char *why, size_t room);
+int dbmFixV2(driver_t *driver, dbm_state_t *state,
+             const dbm_migration_t *migration, char *why, size_t room);
 
 /**
  * `fix --backup-state`: the schema as it was written to
@@ -353,8 +390,12 @@ int dbmStateBackup(dbm_state_t *self);
 
 /** An empty schema, in memory, for `fix` to rebuild from. */
 void dbmStateForgetSchema(dbm_state_t *self);
-int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
-              char *why, size_t room);
+int dbmDownV2(driver_t *driver, dbm_state_t *state,
+              const dbm_migration_t *migration, char *why, size_t room);
+
+/** SHA-256 as 64 hex digits; a file's, or false when it cannot be read. */
+void dbmSha256(const void *data, size_t length, char hex[65]);
+bool dbmSha256File(const char *path, char hex[65]);
 
 /** Runs or, on a dry run, prints. The way every generic version sends SQL. */
 int dbmSend(driver_t *self, dbm_text_t *sql);

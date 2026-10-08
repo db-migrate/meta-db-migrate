@@ -127,9 +127,8 @@ static int stepV2(driver_t *driver, const dbm_migration_t *migration,
 
   int answer =
       direction == UP
-          ? dbmUpV2(driver, driver->state, migration->name, migration->migrate,
-                    why, sizeof why)
-          : dbmDownV2(driver, driver->state, migration->name, why, sizeof why);
+          ? dbmUpV2(driver, driver->state, migration, why, sizeof why)
+          : dbmDownV2(driver, driver->state, migration, why, sizeof why);
 
   if (answer == 0) {
 
@@ -514,8 +513,7 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
 
     dbmSay(stdout, TEXT`[INFO] Fixing the state of ${shown(name)}\n`);
 
-    if (dbmFixV2(driver, driver->state, name, migration->migrate, why,
-                 sizeof why)) {
+    if (dbmFixV2(driver, driver->state, migration, why, sizeof why)) {
       dbmSay(stderr, TEXT`[ERROR] ${shown(name)}: ${why}\n`);
       return -1;
     }

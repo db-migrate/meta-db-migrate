@@ -115,17 +115,31 @@ static const char *holderOf(json_t row) {
 /* the lock row                                                       */
 /* ------------------------------------------------------------------ */
 
+/** `s[key] = value`, in its place if it is there, at the end if not. */
+static void setField(yyjson_mut_doc *doc, yyjson_mut_val *s, const char *key,
+                     yyjson_mut_val *value) {
+
+  if (yyjson_mut_obj_get(s, key) != NULL)
+    yyjson_mut_obj_replace(s, yyjson_mut_str(doc, key), value);
+  else
+    yyjson_mut_obj_add(s, yyjson_mut_strcpy(doc, key), value);
+}
+
 /**
  * The row rewritten with this process's ID, the date and a fresh nonce, and
- * `step`, `fin` and the ID changed where asked: -1 leaves a field alone, and
- * `release` writes the ID node writes when it lets go, `0`. The order of the
- * fields is node's, so a row written here reads the same as one node wrote.
+ * the fields `changes` names - a JSON object, `{"step":3}` - set. Every other
+ * field stays as it was, those this does not know included: the row is
+ * node's as much as this program's, and what node keeps in it to resume an
+ * interrupted migration must survive a write from here. `release` writes the
+ * ID node writes when it lets go, `0`.
  */
-static char *rewritten(dbm_state_t *self, const char *value, int step, int fin,
-                       bool release) {
+static char *rewritten(dbm_state_t *self, const char *value,
+                       const char *changes, bool release) {
 
   json_t old = meta_toJSON(value);
   defer old.release();
+  json_t change = meta_toJSON(changes);
+  defer change.release();
 
   char date[40];
   char n[17];
@@ -133,23 +147,27 @@ static char *rewritten(dbm_state_t *self, const char *value, int step, int fin,
   isoDate(date, sizeof date);
   nonce(n);
 
-  long oldStep = old.s.step;
-  long oldFin = old.s.fin;
-
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_val *s = yyjson_mut_obj(doc);
+  yyjson_mut_val *s = strcmp(old.s.kind(), "object") == 0
+                          ? yyjson_val_mut_copy(doc, old.s.node)
+                          : yyjson_mut_obj(doc);
 
-  yyjson_mut_obj_add_int(doc, s, "step", step >= 0 ? step : oldStep);
-  yyjson_mut_obj_add_int(doc, s, "fin", fin >= 0 ? fin : oldFin);
+  /* node's first fields, in node's order, for a row that has none */
+  if (yyjson_mut_obj_get(s, "step") == NULL)
+    setField(doc, s, "step", yyjson_mut_int(doc, 0));
 
-  if (release)
-    yyjson_mut_obj_add_int(doc, s, "ID", 0);
-  else
-    yyjson_mut_obj_add_strcpy(doc, s, "ID", self->id);
+  if (yyjson_mut_obj_get(s, "fin") == NULL)
+    setField(doc, s, "fin", yyjson_mut_int(doc, 0));
 
-  yyjson_mut_obj_add_strcpy(doc, s, "date", date);
-  yyjson_mut_obj_add_strcpy(doc, s, "n", n);
+  for (int i = 0; i < change.count(); ++i)
+    setField(doc, s, change.keyAt(i),
+             yyjson_val_mut_copy(doc, change.get(change.keyAt(i)).node));
+
+  setField(doc, s, "ID", release ? yyjson_mut_int(doc, 0)
+                                 : yyjson_mut_strcpy(doc, self->id));
+  setField(doc, s, "date", yyjson_mut_strcpy(doc, date));
+  setField(doc, s, "n", yyjson_mut_strcpy(doc, n));
   yyjson_mut_obj_add_val(doc, root, "s", s);
   yyjson_mut_doc_set_root(doc, root);
 
@@ -169,7 +187,7 @@ static void stopHeartbeat(dbm_state_t *self);
  *
  * Holds `writing`: the heartbeat and the walker write the same row.
  */
-static int writeLock(dbm_state_t *self, int step, int fin, bool release) {
+static int writeLock(dbm_state_t *self, const char *changes, bool release) {
 
   pthread_mutex_lock(&self->writing);
 
@@ -179,7 +197,7 @@ static int writeLock(dbm_state_t *self, int step, int fin, bool release) {
     answer = dbmFail(self->db, TEXT`the migration lock is not held by this process`);
   } else {
 
-    char *value = rewritten(self, self->current, step, fin, release);
+    char *value = rewritten(self, self->current, changes, release);
     char *read = NULL;
 
     if (value == NULL ||
@@ -234,7 +252,7 @@ static void *beat(void *raw) {
 
     pthread_mutex_unlock(&self->writing);
 
-    if (writeLock(self, -1, -1, false))
+    if (writeLock(self, "{}", false))
       dbmSay(stderr, TEXT`[ERROR] [state] ${self->db->error}\n`);
 
     pthread_mutex_lock(&self->writing);
@@ -360,7 +378,7 @@ static int acquire(dbm_state_t *self, const char *stale, int retries) {
       dbmSay(stderr, TEXT`[WARN] [state] taking over a stale migration lock from ${when}\n`);
   }
 
-  char *value = rewritten(self, row, -1, -1, false);
+  char *value = rewritten(self, row, "{}", false);
   char *after = NULL;
 
   int swapped = dbmKvSwap(self->db, self->table, LOCK, value, row);
@@ -487,7 +505,7 @@ void dbmStateUnlock(dbm_state_t *self) {
 
   stopHeartbeat(self);
 
-  if (self->owner && writeLock(self, -1, -1, true))
+  if (self->owner && writeLock(self, "{}", true))
     dbmSay(stderr, TEXT`[WARN] [state] ${self->db->error}\n`);
 
   self->active = false;
@@ -501,10 +519,10 @@ void dbmStateUnlock(dbm_state_t *self) {
  * the lock was lost; without one - a driver or a run that does not lock -
  * the row is written as it is.
  */
-int dbmStateProgress(dbm_state_t *self, int step, int fin) {
+int dbmStateMark(dbm_state_t *self, const char *changes) {
 
   if (self->active)
-    return writeLock(self, step, fin, false);
+    return writeLock(self, changes, false);
 
   char *row = NULL;
 
@@ -512,13 +530,38 @@ int dbmStateProgress(dbm_state_t *self, int step, int fin) {
     return -1;
 
   char *value = rewritten(self, row != NULL ? row : "{\"s\":{\"step\":0,\"fin\":0,\"ID\":0}}",
-                          step, fin, true);
+                          changes, true);
   int answer = row == NULL ? dbmKvInsert(self->db, self->table, LOCK, value)
                            : dbmKvUpdate(self->db, self->table, LOCK, value);
 
   free(value);
   free(row);
   return answer;
+}
+
+int dbmStateProgress(dbm_state_t *self, int step, int fin) {
+
+  dbm_text_t changes = {0};
+  defer changes.release();
+
+  changes.put("{");
+
+  if (step >= 0)
+    changes.append(TEXT`"step":${(long)step}`);
+
+  if (fin >= 0)
+    changes.append(TEXT`${step >= 0 ? "," : ""}"fin":${(long)fin}`);
+
+  /* a migration that ends is not rolling back any more, as node has it */
+  if (fin == 1)
+    changes.put(",\"rb\":0");
+
+  changes.put("}");
+
+  if (changes.failed)
+    return dbmFail(self->db, TEXT`out of memory writing the lock row`);
+
+  return dbmStateMark(self, changes.text);
 }
 
 /* ------------------------------------------------------------------ */
@@ -638,17 +681,82 @@ void dbmStateClose(dbm_state_t *self) {
 }
 
 /**
- * Starting a v2 migration: its record, made if there is none - `{}`, as node
- * makes it - and the lock row saying a migration is under way at step 0.
+ * Starting a v2 migration, as node's startMigration does it: the record,
+ * made if there is none - `{}`, as node makes it - and the lock row saying
+ * which migration runs which way, from step 0. What the row said before is
+ * looked at first: a migration that did not finish left `fin` at 0 and its
+ * name in `f`. If that is this one going up again and the caller can
+ * resume, it is described rather than started over.
  */
-char *dbmStateBegin(dbm_state_t *self, const char *key) {
+char *dbmStateBegin(dbm_state_t *self, const char *key, const char *op,
+                    const char *hash, dbm_interrupted_t *interrupted) {
 
   char *record = NULL;
+  char *row = NULL;
+
+  if (interrupted != NULL)
+    memset(interrupted, 0, sizeof *interrupted);
 
   if (dbmKvGet(self->db, self->table, key, &record))
     return NULL;
 
-  if (dbmStateProgress(self, 0, 0)) {
+  /* the row as this process holds it - the heartbeat replaces it, so under its lock */
+  if (self->active) {
+    pthread_mutex_lock(&self->writing);
+    row = self->current != NULL ? strdup(self->current) : NULL;
+    pthread_mutex_unlock(&self->writing);
+  } else if (dbmKvGet(self->db, self->table, LOCK, &row)) {
+    free(record);
+    return NULL;
+  }
+
+  json_t lock = meta_toJSON(row != NULL ? row : "{}");
+  defer lock.release();
+  free(row);
+
+  json_t was = lock.s;
+  const char *running = was.f;
+  bool unfinished = strcmp(was.fin.kind(), "number") == 0 &&
+                    was.fin.number() == 0 && running[0] != '\0';
+
+  if (unfinished) {
+
+    const char *wasHash = was.h;
+
+    if (interrupted != NULL && strcmp(running, key) == 0 &&
+        strcmp(was.o.text(), "up") == 0 && strcmp(op, "up") == 0) {
+
+      interrupted->found = true;
+      interrupted->step = was.step.number();
+      interrupted->learned = was.learned.number();
+      interrupted->done = was.done.number();
+      interrupted->rollback = was.rb.number() == 1;
+      interrupted->changed = wasHash[0] != '\0' && hash != NULL &&
+                             strcmp(wasHash, hash) != 0;
+
+      if (record == NULL) {
+        if (dbmKvInsert(self->db, self->table, key, "{}"))
+          return NULL;
+        record = strdup("{}");
+      }
+
+      return record;
+    }
+
+    dbmSay(stderr, TEXT`[WARN] [state] ignoring the interrupted ${was.o.text()} of migration "${running}" at step ${was.step.number()}\n`);
+  }
+
+  dbm_text_t changes = {0};
+  defer changes.release();
+
+  changes.append(TEXT`{"step":0,"fin":0,"f":"${key}","o":"${op}","learned":0,"done":0,"rb":0,"h":`);
+
+  if (hash != NULL)
+    changes.append(TEXT`"${hash}"}`);
+  else
+    changes.put("null}");
+
+  if (changes.failed || dbmStateMark(self, changes.text)) {
     free(record);
     return NULL;
   }

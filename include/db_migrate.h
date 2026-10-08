@@ -290,6 +290,13 @@ typedef struct {
 
   /** A v2 migration: one function, and `down` is learned from it. */
   dbm_v2_t migrate;
+
+  /**
+   * What a v2 migration that a previous run left unfinished does next -
+   * node's `_meta.recovery`: "skip" (NULL) leaves the steps that ran and
+   * carries on after them, "rollback" undoes them and runs it again.
+   */
+  const char *recovery;
 } dbm_migration_t;
 
 /**
@@ -345,6 +352,19 @@ void dbmRegisterV2(const char *file, dbm_v2_t migrate);
 #define DBM_MIGRATION_V2(migrate)                                              \
   __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
     dbmRegisterV2(__FILE__, migrate);                                          \
+  }
+
+void dbmRegisterV2Recovering(const char *file, dbm_v2_t migrate,
+                             const char *recovery);
+
+/**
+ * A v2 migration that says how it is resumed after an interrupted run -
+ * `DBM_MIGRATION_V2_RECOVERY(migrate, "rollback")` - as node's
+ * `_meta: {version: 2, recovery: 'rollback'}`.
+ */
+#define DBM_MIGRATION_V2_RECOVERY(migrate, recovery)                           \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterV2Recovering(__FILE__, migrate, recovery);                      \
   }
 
 /* ------------------------------------------------------------- drivers */
