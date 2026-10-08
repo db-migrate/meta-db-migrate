@@ -147,7 +147,23 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   return 0;
 }
 
-int dbmUp(driver_t *driver, size_t count, bool dryRun) {
+/**
+ * Whether a migration lies on the near side of a destination, compared the
+ * way node does it: on as many characters as both have. So `20261008` is a
+ * destination that every migration of that day reaches, and a full name is
+ * one migration exactly.
+ */
+static int towards(const char *name, const char *destination) {
+
+  size_t a = strlen(name + 1);
+  size_t b = strlen(destination);
+
+  return strncmp(name + 1, destination, a < b ? a : b);
+}
+
+/** Up to and including the destination, at most `count`; zero is no limit. */
+int dbmUp(driver_t *driver, size_t count, const char *destination,
+          bool dryRun) {
 
   size_t total;
   size_t done = 0;
@@ -166,6 +182,10 @@ int dbmUp(driver_t *driver, size_t count, bool dryRun) {
 
     if (hasRun(names, migrations[i].name))
       continue;
+
+    /* sorted by name, so the first one past the destination ends it */
+    if (destination != NULL && towards(migrations[i].name, destination) > 0)
+      break;
 
     if (step(driver, &migrations[i], UP))
       return -1;
@@ -192,8 +212,13 @@ static const dbm_migration_t *named(const char *name) {
   return NULL;
 }
 
-/** Undoes the last `count` that ran, newest first. Zero is all of them. */
-int dbmDown(driver_t *driver, size_t count, bool dryRun) {
+/**
+ * Undoes the last `count` that ran, newest first, zero being all of them -
+ * and with a destination, everything after it. The destination itself stays,
+ * as node has it: `down 20261008120100` leaves that migration run.
+ */
+int dbmDown(driver_t *driver, size_t count, const char *destination,
+            bool dryRun) {
 
   size_t done = 0;
 
@@ -210,6 +235,10 @@ int dbmDown(driver_t *driver, size_t count, bool dryRun) {
        --i) {
 
     const char *name = names[i].name;
+
+    if (destination != NULL && towards(name, destination) <= 0)
+      break;
+
     const dbm_migration_t *migration = named(name);
 
     if (migration == NULL) {
@@ -231,7 +260,34 @@ int dbmDown(driver_t *driver, size_t count, bool dryRun) {
 }
 
 int dbmReset(driver_t *driver, bool dryRun) {
-  return dbmDown(driver, 0, dryRun);
+  return dbmDown(driver, 0, NULL, dryRun);
+}
+
+/**
+ * To the destination from wherever the database is: down when the newest
+ * migration run lies past it, up otherwise.
+ */
+int dbmSync(driver_t *driver, const char *destination, bool dryRun) {
+
+  driver->dryRun = dryRun;
+
+  json_t names, bool ready = loaded(driver);
+
+  if (!ready)
+    return -1;
+
+  int newest = names.count() - 1;
+  bool past = newest >= 0 && towards(names[newest].name, destination) > 0;
+
+  names.release();
+
+  if (past) {
+    dbmSay(stdout, TEXT`[INFO] Syncing downwards to ${destination}\n`);
+    return dbmDown(driver, 0, destination, dryRun);
+  }
+
+  dbmSay(stdout, TEXT`[INFO] Syncing upwards to ${destination}\n`);
+  return dbmUp(driver, 0, destination, dryRun);
 }
 
 int dbmCheck(driver_t *driver) {

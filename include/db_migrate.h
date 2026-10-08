@@ -264,16 +264,23 @@ void dbmClose(driver_t *driver);
 /**
  * The commands, as the command line spells them.
  *
- *   up [n]      run what has not been run, or the next n
- *   down [n]    undo the last one, or the last n
- *   reset       undo everything
- *   check       list what has not been run
+ *   up [name]       run what has not been run, up to and including name
+ *   down [name]     undo the last one - or everything after name
+ *   sync name       up or down, whichever reaches name
+ *   reset           undo everything
+ *   check           list what has not been run
+ *
+ * `-c n` limits up and down to n migrations. A name may be cut short: a
+ * timestamp, or the start of one, is a destination too.
  *
  * Answers 0 when it did what was asked.
  */
-int dbmUp(driver_t *driver, size_t count, bool dryRun);
-int dbmDown(driver_t *driver, size_t count, bool dryRun);
+int dbmUp(driver_t *driver, size_t count, const char *destination,
+          bool dryRun);
+int dbmDown(driver_t *driver, size_t count, const char *destination,
+            bool dryRun);
 int dbmReset(driver_t *driver, bool dryRun);
+int dbmSync(driver_t *driver, const char *destination, bool dryRun);
 int dbmCheck(driver_t *driver);
 
 /**

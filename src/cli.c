@@ -3,7 +3,10 @@
  *
  *   app migrate up                     everything not run yet
  *   app migrate up -c 2                the next two
+ *   app migrate up 20261008120100      up to and including that one
  *   app migrate down                   the last one
+ *   app migrate down 20261008120100    everything after that one
+ *   app migrate sync 20261008120100    up or down, whichever gets there
  *   app migrate reset                  all of them, backwards
  *   app migrate check                  what would run
  *   app migrate create add-pets        a new file in migrations/
@@ -38,7 +41,7 @@ typedef struct {
 } options_t;
 
 static int usage(void) {
-  dbmSay(stderr, TEXT`usage: migrate up|down|reset|check|create [name] [-c count] [-e env] [--config file] [--dry-run] [--sql-file]\n`);
+  dbmSay(stderr, TEXT`usage: migrate up|down|sync|reset|check|create [name] [-c count] [-e env] [--config file] [--dry-run] [--sql-file]\n`);
   return 2;
 }
 
@@ -312,8 +315,13 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
-  if (!(options.command in {"up", "down", "reset", "check"}))
+  if (!(options.command in {"up", "down", "reset", "check", "sync"}))
     return usage();
+
+  if (strcmp(options.command, "sync") == 0 && options.name == NULL) {
+    dbmSay(stderr, TEXT`sync needs a destination: migrate sync 20261008120000\n`);
+    return 2;
+  }
 
   json_t config = configuration(&options, why, sizeof why);
   defer config.release();
@@ -332,11 +340,20 @@ int dbmCli(int argc, char **argv) {
 
   int answer;
 
+  /**
+   * `down` undoes one unless told otherwise - but with a destination it
+   * undoes everything after it, as node does, and a count limits that.
+   */
+  size_t downCount = options.countGiven ? options.count
+                     : options.name != NULL ? 0
+                                            : 1;
+
   if (strcmp(options.command, "up") == 0)
-    answer = dbmUp(driver, options.count, options.dryRun);
+    answer = dbmUp(driver, options.count, options.name, options.dryRun);
   else if (strcmp(options.command, "down") == 0)
-    answer = dbmDown(driver, options.countGiven ? options.count : 1,
-                     options.dryRun);
+    answer = dbmDown(driver, downCount, options.name, options.dryRun);
+  else if (strcmp(options.command, "sync") == 0)
+    answer = dbmSync(driver, options.name, options.dryRun);
   else if (strcmp(options.command, "reset") == 0)
     answer = dbmReset(driver, options.dryRun);
   else
