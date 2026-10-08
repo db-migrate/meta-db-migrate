@@ -179,6 +179,7 @@ for driver in $drivers; do
     cp "$here/main.c" "$here/database.json" "$into/"
     cp "$here"/migrations/common/*.c "$here/migrations/$driver"/*.c \
       "$into/migrations/"
+    cp -r "$here/migrations/common/sqls" "$into/migrations/"
   done
 
   cp "$here"/migrations/failing/*.c "$failing/migrations/"
@@ -189,7 +190,8 @@ for driver in $drivers; do
   "$top/build-app.sh" "$failing" "$failing/app" "$driver" \
     >"$failing/build.log" 2>&1 || { cat "$failing/build.log"; exit 1; }
 
-  total=$(ls "$work/migrations" | wc -l)
+  total=$(( $(ls "$work"/migrations/*.c | wc -l) +
+             $(ls "$work"/migrations/sqls/*-up.sql | wc -l) ))
   app="$work/app"
 
   cd "$work"
@@ -201,6 +203,8 @@ for driver in $drivers; do
   expect "the rows are there" "kurbel,mausi,omalley" \
     "$(sql "select $(slugColumn) from pets order by id" | paste -sd, -)"
   expect "a comparison is a truth value" "false true false" "$(lazy)"
+  expect "a migration in SQL, quotes and all" "it's; \"quoted\" fine" \
+    "$(sql "select body from notes")"
   expect "and what only $driver does" "$(ownWanted)" "$(own)"
 
   "$app" down -e "$driver" -c $((total - 1)) >/dev/null 2>&1
