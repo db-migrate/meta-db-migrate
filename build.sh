@@ -81,12 +81,23 @@ for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
   drivers="$drivers $out/obj/driver-$name.o"
 done
 
-# the runtime, once
-$cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} -I "$root/runtime/include" \
-    -c "$root/runtime/meta_tasks.c" -o "$out/obj/meta_tasks.o"
-$cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} \
-    -c "$root/runtime/vendor/yyjson/yyjson.c" -o "$out/obj/yyjson.o"
-runtime="$out/obj/meta_tasks.o $out/obj/yyjson.o"
+# the runtime, once: from its sources in a metalanguage checkout, or as the
+# objects a published meta brings in lib/libmeta_runtime.a
+if [ -f "$root/runtime/meta_tasks.c" ]; then
+  $cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} -I "$root/runtime/include" \
+      -c "$root/runtime/meta_tasks.c" -o "$out/obj/meta_tasks.o"
+  $cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} \
+      -c "$root/runtime/vendor/yyjson/yyjson.c" -o "$out/obj/yyjson.o"
+  runtime="$out/obj/meta_tasks.o $out/obj/yyjson.o"
+elif [ -f "$root/lib/libmeta_runtime.a" ]; then
+  rm -rf "$out/obj/runtime"
+  mkdir -p "$out/obj/runtime"
+  (cd "$out/obj/runtime" && ar x "$root/lib/libmeta_runtime.a")
+  runtime=$(ls "$out"/obj/runtime/*.o)
+else
+  echo "$root has neither runtime/meta_tasks.c nor lib/libmeta_runtime.a" >&2
+  exit 1
+fi
 
 rm -f "$out"/libdbmigrate*.a
 ar rcs "$out/libdbmigrate.a" $core $runtime
