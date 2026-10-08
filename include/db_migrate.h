@@ -46,6 +46,8 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#define DBM_VERSION "0.1.0"
+
 typedef struct driver_t driver_t;
 
 /**

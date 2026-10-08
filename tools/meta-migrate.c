@@ -460,7 +460,7 @@ int main(int argc, char **argv) {
 
   for (int i = 1; i < argc; ++i) {
 
-    if (strcmp(argv[i], "--migrations-dir") == 0 && i + 1 < argc)
+    if ((argv[i] in {"-m", "--migrations-dir"}) && i + 1 < argc)
       dir = argv[i + 1];
 
     if (strcmp(argv[i], "create") == 0)

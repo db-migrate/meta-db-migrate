@@ -38,10 +38,45 @@ typedef struct {
   bool countGiven;
   bool dryRun;
   bool sqlFile;
+  bool verbose;
+  bool noTransactions;
+  bool checkOnly;
+  bool help;
+  bool version;
+  const char *table;
 } options_t;
 
+static int help(void) {
+
+  dbmSay(stdout, TEXT`usage: migrate <command> [name] [options]
+
+commands:
+  up [name]          run what has not run, up to and including name
+  down [name]        undo the last one, or everything after name
+  sync name          up or down, whichever reaches name
+  reset              undo everything
+  check              list what would run
+  create name        a new migration in migrations/
+
+options:
+  -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
+  --config FILE               database.json somewhere else
+  -m, --migrations-dir DIR    where migrations are (migrations)
+  -c, --count N               at most N migrations
+  -t, --table NAME            the table the history is kept in (migrations)
+  --dry-run                   print the statements instead of sending them
+  --check                     with up or sync: list what would run
+  -v, --verbose               print every statement as it is sent
+  --non-transactional         no transaction around a migration
+  --sql-file                  create: an up and a down .sql file instead
+  -i, --version               print the version
+  -h, --help                  this
+`);
+  return 0;
+}
+
 static int usage(void) {
-  dbmSay(stderr, TEXT`usage: migrate up|down|sync|reset|check|create [name] [-c count] [-e env] [--config file] [--dry-run] [--sql-file]\n`);
+  dbmSay(stderr, TEXT`usage: migrate up|down|sync|reset|check|create [name] [options] - --help says which\n`);
   return 2;
 }
 
@@ -56,8 +91,20 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->env = argv[++i];
     else if (strcmp(word, "--config") == 0 && hasNext)
       into->config = argv[++i];
-    else if (strcmp(word, "--migrations-dir") == 0 && hasNext)
+    else if (word in {"-m", "--migrations-dir"} && hasNext)
       into->dir = argv[++i];
+    else if (word in {"-t", "--table", "--migration-table"} && hasNext)
+      into->table = argv[++i];
+    else if (word in {"-v", "--verbose"})
+      into->verbose = true;
+    else if (strcmp(word, "--non-transactional") == 0)
+      into->noTransactions = true;
+    else if (strcmp(word, "--check") == 0)
+      into->checkOnly = true;
+    else if (word in {"-h", "--help", "-?"})
+      into->help = true;
+    else if (word in {"-i", "--version"})
+      into->version = true;
     else if (word in {"-c", "--count"} && hasNext) {
       into->count = strtoul(argv[++i], NULL, 10);
       into->countGiven = true;
@@ -78,7 +125,7 @@ static bool readOptions(int argc, char **argv, options_t *into) {
     }
   }
 
-  return into->command != NULL;
+  return into->command != NULL || into->help || into->version;
 }
 
 /** A whole file, or NULL. The caller frees it. */
@@ -312,6 +359,14 @@ int dbmCli(int argc, char **argv) {
   if (!readOptions(argc, argv, &options))
     return usage();
 
+  if (options.help)
+    return help();
+
+  if (options.version) {
+    dbmSay(stdout, TEXT`${DBM_VERSION}\n`);
+    return 0;
+  }
+
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
@@ -339,6 +394,16 @@ int dbmCli(int argc, char **argv) {
   }
 
   int answer;
+
+  if (options.table != NULL)
+    driver->migrationTable = options.table;
+
+  driver->verbose = options.verbose;
+  driver->noTransactions = options.noTransactions;
+
+  /* `up --check` is node's way of asking `check` */
+  if (options.checkOnly && options.command in {"up", "sync"})
+    options.command = "check";
 
   /**
    * `down` undoes one unless told otherwise - but with a destination it

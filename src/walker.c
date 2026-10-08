@@ -96,7 +96,7 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
     return -1;
   }
 
-  if (driver->startMigration(driver)) {
+  if (!driver->noTransactions && driver->startMigration(driver)) {
     dbmSay(stderr, TEXT`[ERROR] could not start a transaction: ${driver->error}\n`);
     return -1;
   }
@@ -133,13 +133,13 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   if (db.failed) {
     dbmSay(stderr, TEXT`[ERROR] ${migration->name + 1}: ${db.error}\n`);
 
-    if (driver->abortMigration(driver))
+    if (!driver->noTransactions && driver->abortMigration(driver))
       dbmSay(stderr, TEXT`[ERROR] and the rollback failed too: ${driver->error}\n`);
 
     return -1;
   }
 
-  if (driver->endMigration(driver)) {
+  if (!driver->noTransactions && driver->endMigration(driver)) {
     dbmSay(stderr, TEXT`[ERROR] could not commit ${migration->name + 1}: ${driver->error}\n`);
     return -1;
   }
