@@ -29,12 +29,13 @@
  * Where meta, its runtime headers, db-migrate's headers and the drivers are
  * is baked in when this is built, and can be moved with META_ROOT,
  * DBM_INCLUDE and DBM_DRIVERS. Where the baked-in place is gone - a release,
- * unpacked somewhere else - they are looked for beside this program:
+ * unpacked somewhere else - db-migrate's parts are looked for beside this
+ * program, and meta where the image wxone/meta puts it:
  *
  *   <prefix>/bin/meta-migrate
  *   <prefix>/include/            db-migrate's headers
  *   <prefix>/lib/                the drivers and plugins
- *   <prefix>/lib/meta/           meta and its runtime/include
+ *   /opt/meta/                   meta and its runtime/include
  */
 #include <db_migrate.h>
 
@@ -99,7 +100,7 @@ static const char *prefix(void) {
 
 /**
  * A directory: the variable, else what was baked in if it is still there,
- * else `<prefix>/<beside>`.
+ * else `<prefix>/<beside>` - or `beside` itself when it is absolute.
  */
 static const char *place(const char *variable, const char *baked,
                          const char *beside, char *into, size_t room) {
@@ -113,13 +114,16 @@ static const char *place(const char *variable, const char *baked,
   if (stat(baked, &seen) == 0)
     return baked;
 
+  if (beside[0] == '/')
+    return beside;
+
   dbmWrite(into, room, TEXT`${prefix()}/${beside}`);
   return into;
 }
 
 static const char *metaRoot(void) {
   static char found[1100];
-  return place("META_ROOT", DBM_META_ROOT, "lib/meta", found, sizeof found);
+  return place("META_ROOT", DBM_META_ROOT, "/opt/meta", found, sizeof found);
 }
 
 static const char *includeDirectory(void) {
