@@ -7,8 +7,11 @@
 #
 # libpq is built from PostgreSQL's source, without GSSAPI and LDAP: the
 # distribution's libpq.a wants Kerberos, which no distribution ships static.
-# That needs a C compiler, curl, bzip2, bison, flex and perl.
-# OpenSSL, SQLite and libyaml are the distribution's static archives.
+# That needs a C compiler, curl, bzip2, bison, flex and perl. SQLite is built
+# from its amalgamation, since the distribution's libsqlite3.a cannot go into
+# a shared object. OpenSSL and libyaml are the distribution's archives. All
+# of them are position independent, so the launcher's drivers can carry them
+# as well as programs can.
 #
 # glibc stays dynamic, as everywhere: name resolution goes through its NSS
 # modules, which are the host's. libmysqlclient is left out on purpose - it
@@ -24,6 +27,12 @@ set -eu
 
 pg_version=18.6
 pg_sha256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
+
+# 3.53.4; sqlite.org publishes SHA3-256 628a44cf...227934e for it
+sqlite_version=3.53.4
+sqlite_file=sqlite-amalgamation-3530400
+sqlite_year=2026
+sqlite_sha256=1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
 
 out=$1
 mkdir -p "$out/lib" "$out/include" "$out/licenses"
@@ -69,6 +78,21 @@ if nm -u "$out/lib/libpq.a" | grep -q " U gss_\| U ldap_"; then
   exit 1
 fi
 
+# -------------------------------------------------------------- SQLite
+
+zip="$work/$sqlite_file.zip"
+curl -fsSL -o "$zip" "https://www.sqlite.org/$sqlite_year/$sqlite_file.zip"
+echo "$sqlite_sha256  $zip" | sha256sum -c - >/dev/null
+python3 -m zipfile -e "$zip" "$work"
+
+cc -O2 -fPIC -DSQLITE_THREADSAFE=1 -c "$work/$sqlite_file/sqlite3.c" \
+   -o "$work/sqlite3.o"
+ar rcs "$out/lib/libsqlite3.a" "$work/sqlite3.o"
+cp "$work/$sqlite_file/sqlite3.h" "$out/include/"
+# SQLite is in the public domain; its blessing is the header's first comment
+sed -n '1,/\*\*\*\*\*\*\*\*\*\*\*\*\*\*/p' "$work/$sqlite_file/sqlite3.h" \
+  >"$out/licenses/sqlite.txt"
+
 # ------------------------------------------- the distribution's archives
 
 # package, the archives it brings, the name it goes by, its license
@@ -93,12 +117,12 @@ packaged() {
 
 : >"$work/packaged.json"
 packaged libssl-dev openssl Apache-2.0 libssl.a libcrypto.a
-packaged libsqlite3-dev sqlite blessing libsqlite3.a
 packaged libyaml-dev libyaml MIT libyaml.a
 
 cat >"$out/deps.json" <<EOF
 [
 {"name": "libpq", "version": "$pg_version", "license": "PostgreSQL", "purl": "pkg:generic/postgresql@$pg_version", "source": "https://ftp.postgresql.org/pub/source/v$pg_version/postgresql-$pg_version.tar.bz2", "sha256": "$pg_sha256", "built": "--with-ssl=openssl --without-gssapi --without-ldap --without-icu --without-readline --without-zlib"},
+{"name": "sqlite", "version": "$sqlite_version", "license": "blessing", "purl": "pkg:generic/sqlite@$sqlite_version", "source": "https://www.sqlite.org/$sqlite_year/$sqlite_file.zip", "sha256": "$sqlite_sha256", "built": "-O2 -fPIC -DSQLITE_THREADSAFE=1"},
 $(sed '$ s/,$//' "$work/packaged.json")
 ]
 EOF
