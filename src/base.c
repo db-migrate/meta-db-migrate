@@ -95,8 +95,11 @@ void dbmSay(FILE *to, text_t line) {
 
   char *text = line.owned();
 
-  if (text != NULL)
+  /* flushed: piped into a CI log, an error stays after the line it is about */
+  if (text != NULL) {
     fputs(text, to);
+    fflush(to);
+  }
 
   free(text);
 }
