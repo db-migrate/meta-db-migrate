@@ -11,6 +11,7 @@
  *   -e, --env NAME       which entry of database.json (NODE_ENV, then dev)
  *   --config FILE        database.json somewhere else
  *   --dry-run            print the statements instead of sending them
+ *   --sql-file           `create` writes an up and a down .sql file instead
  *   --migrations-dir D   where `create` writes (migrations)
  *
  * Without a database.json, DATABASE_URL is the configuration, as it is for
@@ -33,10 +34,11 @@ typedef struct {
   size_t count;
   bool countGiven;
   bool dryRun;
+  bool sqlFile;
 } options_t;
 
 static int usage(void) {
-  dbmSay(stderr, TEXT`usage: migrate up|down|reset|check|create [name] [-c count] [-e env] [--config file] [--dry-run]\n`);
+  dbmSay(stderr, TEXT`usage: migrate up|down|reset|check|create [name] [-c count] [-e env] [--config file] [--dry-run] [--sql-file]\n`);
   return 2;
 }
 
@@ -58,6 +60,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->countGiven = true;
     } else if (strcmp(word, "--dry-run") == 0)
       into->dryRun = true;
+    else if (strcmp(word, "--sql-file") == 0)
+      into->sqlFile = true;
     else if (word[0] == '-') {
       dbmSay(stderr, TEXT`unknown option ${word}\n`);
       return false;
@@ -209,6 +213,46 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
 }
 
 /** `migrations/20261008120000-add-pets.c`, with an up and a down to fill in. */
+/** One SQL file of a migration, with what node's template puts in it. */
+static bool writeSql(const char *path) {
+
+  FILE *file = fopen(path, "wx");
+
+  if (file == NULL) {
+    perror(path);
+    return false;
+  }
+
+  dbmSay(file, TEXT`/* Replace with your SQL commands */`);
+  fclose(file);
+  dbmSay(stdout, TEXT`[INFO] Created migration at ${path}\n`);
+  return true;
+}
+
+/**
+ * `migrations/sqls/<stamp>-<name>-up.sql` and `-down.sql`, where node
+ * db-migrate's `create --sql-file` puts them. No file of code beside them:
+ * node needs a stub to read them, and here the migration *is* the two files.
+ */
+static int createSqlFiles(const char *dir, const char *stamp,
+                          const char *name) {
+
+  char sqls[512];
+  char path[640];
+
+  dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
+  mkdir(sqls, 0755);
+
+  dbmWrite(path, sizeof path, TEXT`${sqls}/${stamp}-${name}-up.sql`);
+
+  if (!writeSql(path))
+    return 1;
+
+  dbmWrite(path, sizeof path, TEXT`${sqls}/${stamp}-${name}-down.sql`);
+
+  return writeSql(path) ? 0 : 1;
+}
+
 static int create(const options_t *options) {
 
   char stamp[32];
@@ -224,9 +268,13 @@ static int create(const options_t *options) {
 
   gmtime_r(&now, &utc);
   strftime(stamp, sizeof stamp, "%Y%m%d%H%M%S", &utc);
-  dbmWrite(path, sizeof path, TEXT`${dir}/${stamp}-${options->name}.c`);
 
   mkdir(dir, 0755);
+
+  if (options->sqlFile)
+    return createSqlFiles(dir, stamp, options->name);
+
+  dbmWrite(path, sizeof path, TEXT`${dir}/${stamp}-${options->name}.c`);
 
   FILE *file = fopen(path, "wx");
 

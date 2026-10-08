@@ -182,6 +182,13 @@ typedef struct {
   /** For one registered by `dbmRegisterLazily`: where it is and how to load it. */
   char file[1024];
   dbm_load_t load;
+
+  /**
+   * A migration written as SQL rather than as code: what `up` and `down`
+   * send, in place of the two functions. Owned by the entry.
+   */
+  char *upSql;
+  char *downSql;
 } dbm_migration_t;
 
 /**
@@ -201,6 +208,21 @@ void dbmRegisterLazily(const char *file, dbm_load_t load);
 
 /** Makes sure a migration's steps are there, loading it if it was registered lazily. */
 bool dbmLoaded(const dbm_migration_t *migration);
+
+/**
+ * A migration written as SQL: `migrations/sqls/<name>-up.sql` and
+ * `<name>-down.sql`, the files node db-migrate's `create --sql-file` makes.
+ * `file` is any path whose last part is the migration's name, with or without
+ * `-up.sql`; the texts are copied.
+ */
+void dbmRegisterSql(const char *file, const char *up, const char *down);
+
+/**
+ * A loader for `dbmRegisterLazily`: reads `<name>-up.sql` and the
+ * `-down.sql` beside it. A missing down file is a migration that cannot be
+ * undone, which `down` then says rather than doing nothing.
+ */
+bool dbmLoadSqlFiles(const char *upFile);
 
 /** Every migration registered so far, sorted by name. */
 const dbm_migration_t *dbmMigrations(size_t *count);

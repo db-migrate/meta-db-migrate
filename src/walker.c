@@ -46,22 +46,53 @@ static bool hasRun(json_t names, const char *name) {
   return false;
 }
 
+/** Whether SQL text says nothing: whitespace, `--` lines and block comments only. */
+static bool onlyComments(const char *sql) {
+
+  const char *at = sql;
+
+  while (*at != '\0') {
+
+    if (*at in {' ', '\t', '\n', '\r'}) {
+      ++at;
+    } else if (at[0] == '-' && at[1] == '-') {
+      while (*at != '\0' && *at != '\n')
+        ++at;
+    } else if (at[0] == '/' && at[1] == '*') {
+
+      const char *end = strstr(at + 2, "*/");
+
+      if (end == NULL)
+        return false;
+
+      at = end + 2;
+    } else {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 /** One migration, one direction, one transaction. */
 static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
 
   migrator_t db = {.driver = driver, .dryRun = driver->dryRun};
+
   /* compiled and opened now, if the launcher only knew its file */
   if (!dbmLoaded(migration))
     return -1;
 
   dbm_step_t body = direction == UP ? migration->up : migration->down;
+  const char *sql = direction == UP ? migration->upSql : migration->downSql;
+  const char *way = direction == UP ? "up" : "down";
 
   dbmSay(stdout, TEXT`[INFO] ${direction == UP ? "Processing migration"
                                            : "Undoing migration"} ${migration->name + 1}\n`);
 
-  if (body == NULL) {
-    dbmSay(stderr, TEXT`[ERROR] ${migration->name + 1} has no ${direction == UP ? "up" : "down"}\n`);
+  if (body == NULL && sql == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${migration->name + 1} has no ${way}\n`);
     return -1;
   }
 
@@ -70,7 +101,15 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
     return -1;
   }
 
-  int answer = body(&db);
+  /**
+   * A migration in SQL is its text, sent as it is - unless there is nothing
+   * in it but comments, which is what `create --sql-file` writes and what a
+   * migration with no `down` worth having keeps. MySQL calls an empty
+   * statement an error; nothing to do is not one.
+   */
+  int answer = body != NULL       ? body(&db)
+               : onlyComments(sql) ? 0
+                                   : db.runSql(sql);
 
   /**
    * A migration that answered 0 but has a failure recorded failed: the

@@ -213,8 +213,11 @@ static bool nameOf(const char *file, char *into, size_t room) {
   base = base != NULL ? base + 1 : file;
   length = strlen(base);
 
+  /* a migration in code, or one in SQL named by its up file */
   if (length > 2 && strcmp(base + length - 2, ".c") == 0)
     length -= 2;
+  else if (length > 7 && strcmp(base + length - 7, "-up.sql") == 0)
+    length -= 7;
 
   if (length + 2 > room) {
     dbmSay(stderr, TEXT`db-migrate: the name of ${file} is too long to record\n`);
@@ -279,14 +282,15 @@ void dbmRegisterLazily(const char *file, dbm_load_t load) {
 bool dbmLoaded(const dbm_migration_t *migration) {
 
   if (migration->load == NULL || migration->up != NULL ||
-      migration->down != NULL)
+      migration->down != NULL || migration->upSql != NULL)
     return true;
 
   if (!migration->load(migration->file))
     return false;
 
   /* its DBM_MIGRATION filled this very entry in, if the name agreed */
-  if (migration->up == NULL && migration->down == NULL) {
+  if (migration->up == NULL && migration->down == NULL &&
+      migration->upSql == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${migration->file} was loaded and registered nothing - it needs a DBM_MIGRATION(up, down)\n`);
     return false;
   }
@@ -299,6 +303,82 @@ static int byName(const void *a, const void *b) {
                 ((const dbm_migration_t *)b)->name);
 }
 
+void dbmRegisterSql(const char *file, const char *up, const char *down) {
+
+  dbm_migration_t entry;
+
+  memset(&entry, 0, sizeof entry);
+
+  if (!nameOf(file, entry.name, sizeof entry.name))
+    return;
+
+  dbm_migration_t *known = migrationNamed(entry.name);
+
+  if (known == NULL) {
+    migrations.push(entry);
+    known = migrationNamed(entry.name);
+  }
+
+  if (known == NULL)
+    return;
+
+  free(known->upSql);
+  free(known->downSql);
+  known->upSql = up != NULL ? strdup(up) : NULL;
+  known->downSql = down != NULL ? strdup(down) : NULL;
+}
+
+/** A whole file, or NULL. The caller frees it. */
+static char *slurp(const char *path) {
+
+  FILE *file = fopen(path, "rb");
+  char *text = NULL;
+  long length;
+
+  if (file == NULL)
+    return NULL;
+
+  if (fseek(file, 0, SEEK_END) == 0 && (length = ftell(file)) >= 0 &&
+      fseek(file, 0, SEEK_SET) == 0 && (text = malloc((size_t)length + 1))) {
+
+    size_t got = fread(text, 1, (size_t)length, file);
+
+    text[got] = '\0';
+  }
+
+  fclose(file);
+  return text;
+}
+
+bool dbmLoadSqlFiles(const char *upFile) {
+
+  char downFile[1100];
+  size_t length = strlen(upFile);
+
+  if (length < 7 || strcmp(upFile + length - 7, "-up.sql") != 0) {
+    dbmSay(stderr, TEXT`[ERROR] ${upFile} is not an -up.sql file\n`);
+    return false;
+  }
+
+  dbmWrite(downFile, sizeof downFile, TEXT`${upFile}`);
+  dbmWrite(downFile + length - 7, sizeof downFile - (length - 7),
+           TEXT`-down.sql`);
+
+  char *up = slurp(upFile);
+  char *down = slurp(downFile);
+
+  if (up == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] cannot read ${upFile}\n`);
+    free(down);
+    return false;
+  }
+
+  dbmRegisterSql(upFile, up, down);
+  free(up);
+  free(down);
+  return true;
+}
+
 const dbm_migration_t *dbmMigrations(size_t *count) {
 
   qsort(migrations.items, migrations.count, sizeof(dbm_migration_t), byName);
@@ -308,6 +388,12 @@ const dbm_migration_t *dbmMigrations(size_t *count) {
 }
 
 void dbmForgetMigrations(void) {
+
+  for (entry in migrations) {
+    free(entry->upSql);
+    free(entry->downSql);
+  }
+
   migrations.release();
 }
 
