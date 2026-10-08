@@ -1,0 +1,128 @@
+# The tests against every database, and a release on a tag.
+#
+# meta is not on GitHub's own runners: it is checked out from the repository
+# the variable METALANGUAGE_REPOSITORY names (owner/name), at
+# METALANGUAGE_REF, with the token in the secret METALANGUAGE_TOKEN when that
+# repository is private - and built here.
+name: ci
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  META_ROOT: ${{ github.workspace }}/metalanguage
+
+jobs:
+  test:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: meta-db-migrate
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.METALANGUAGE_REPOSITORY }}
+          ref: ${{ vars.METALANGUAGE_REF || 'parser-rewrite' }}
+          token: ${{ secrets.METALANGUAGE_TOKEN || github.token }}
+          path: metalanguage
+
+      - name: system packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends cmake libpq-dev \
+            libmysqlclient-dev libsqlite3-dev libyaml-dev sqlite3 \
+            postgresql-client mysql-client openssh-server
+
+      - name: meta
+        working-directory: metalanguage
+        run: cmake . >/dev/null && make -j"$(nproc)" meta
+
+      - name: databases
+        run: |
+          case ${{ matrix.suite }} in
+            pg|plugins)
+              docker run -d --name dbm-meta-pg -e POSTGRES_PASSWORD=dbm \
+                -e POSTGRES_DB=dbm -p 127.0.0.1:55432:5432 postgres:12-alpine
+              until pg_isready -q -h 127.0.0.1 -p 55432; do sleep 1; done ;;
+            cockroachdb)
+              docker run -d --name dbm-meta-crdb -p 127.0.0.1:56257:26257 \
+                cockroachdb/cockroach:latest-v24.3 start-single-node --insecure
+              until docker exec dbm-meta-crdb ./cockroach sql --insecure \
+                  -e "create database if not exists dbm" 2>/dev/null; do
+                sleep 1
+              done ;;
+            mysql)
+              docker run -d --name dbm-meta-mysql -e MYSQL_ROOT_PASSWORD=dbm \
+                -e MYSQL_DATABASE=dbm -p 127.0.0.1:53306:3306 \
+                mysql:8.0.28-oracle
+              until mysql -h127.0.0.1 -P53306 -uroot -pdbm -e "select 1" dbm \
+                  >/dev/null 2>&1; do
+                sleep 1
+              done ;;
+          esac
+          # sshd will not start, even as a user, without its directory
+          sudo mkdir -p /run/sshd
+
+      - name: build
+        working-directory: meta-db-migrate
+        run: ./build.sh
+
+      - name: test
+        working-directory: meta-db-migrate
+        run: |
+          case ${{ matrix.suite }} in
+            options|plugins) test/${{ matrix.suite }}.sh ;;
+            *) test/run.sh ${{ matrix.suite }} ;;
+          esac
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: meta-db-migrate
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.METALANGUAGE_REPOSITORY }}
+          ref: ${{ vars.METALANGUAGE_REF || 'parser-rewrite' }}
+          token: ${{ secrets.METALANGUAGE_TOKEN || github.token }}
+          path: metalanguage
+
+      - name: system packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends cmake libpq-dev \
+            libmysqlclient-dev libsqlite3-dev libyaml-dev
+
+      # meta bakes its paths in, so the release is built where it installs
+      - name: release
+        working-directory: meta-db-migrate
+        run: |
+          sudo mkdir -p /opt/meta-db-migrate
+          sudo chown "$(id -u):$(id -g)" /opt/meta-db-migrate
+          tools/release.sh "$META_ROOT" /opt/meta-db-migrate \
+            "dist/meta-db-migrate-${GITHUB_REF_NAME}-linux-x86_64.tar.gz"
+
+      - name: publish
+        working-directory: meta-db-migrate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
+            --title "$GITHUB_REF_NAME" --notes \
+            "Unpacks to /opt/meta-db-migrate: tar -xzf <file> -C /opt"
