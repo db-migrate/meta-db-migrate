@@ -559,6 +559,54 @@ static int database(const options_t *options, json_t config) {
   return answer == 0 ? 0 : 1;
 }
 
+/**
+ * The connection, and node's state - the lock, and what v2 migrations
+ * learned - through a connection of its own, so it outlives a migration's
+ * transaction being rolled back on the other one. NULL, with the reason.
+ */
+static driver_t *connected(json_t config, const dbm_options_t *options,
+                           bool readOnly, driver_t **stateDriver, char *why,
+                           size_t room) {
+
+  driver_t *driver = dbmOpen(config, why, room);
+
+  if (driver == NULL)
+    return NULL;
+
+  if (options->migrationTable != NULL)
+    driver->migrationTable = options->migrationTable;
+
+  driver->verbose = options->verbose;
+
+  *stateDriver = dbmOpen(config, why, room);
+
+  if (*stateDriver == NULL) {
+    dbmClose(driver);
+    return NULL;
+  }
+
+  (*stateDriver)->verbose = options->verbose;
+  driver->state = dbmStateOpen(
+      *stateDriver,
+      options->stateTable != NULL ? options->stateTable : "migrations_state",
+      options->lockTimeout, options->lockInterval, readOnly);
+
+  if (driver->state == NULL) {
+    dbmWrite(why, room, TEXT`could not open the state table: ${(*stateDriver)->error}`);
+    dbmClose(*stateDriver);
+    dbmClose(driver);
+    return NULL;
+  }
+
+  return driver;
+}
+
+static void disconnected(driver_t *driver, driver_t *stateDriver) {
+  dbmStateClose(driver->state);
+  dbmClose(stateDriver);
+  dbmClose(driver);
+}
+
 int dbmCli(int argc, char **argv) {
 
   options_t options = {0};
@@ -634,7 +682,18 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "db") == 0)
     return database(&options, config);
 
-  driver_t *driver = dbmOpen(config, why, sizeof why);
+  dbm_options_t settings = {
+      .migrationTable = options.table,
+      .stateTable = options.stateTable,
+      .lockTimeout = options.lockTimeout,
+      .lockInterval = options.lockInterval,
+      .verbose = options.verbose,
+  };
+  driver_t *stateDriver;
+  driver_t *driver = connected(
+      config, &settings,
+      options.dryRun || strcmp(options.command, "check") == 0, &stateDriver,
+      why, sizeof why);
 
   if (driver == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
@@ -643,39 +702,8 @@ int dbmCli(int argc, char **argv) {
 
   int answer;
 
-  if (options.table != NULL)
-    driver->migrationTable = options.table;
-
-  driver->verbose = options.verbose;
   driver->noTransactions = options.noTransactions;
   driver->ignoreOnInit = options.ignoreOnInit;
-
-  /**
-   * node's state - the lock, and what v2 migrations learned - through a
-   * connection of its own, so it outlives a migration's transaction being
-   * rolled back on the other one.
-   */
-  driver_t *stateDriver = dbmOpen(config, why, sizeof why);
-
-  if (stateDriver == NULL) {
-    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
-    dbmClose(driver);
-    return 1;
-  }
-
-  stateDriver->verbose = options.verbose;
-  driver->state = dbmStateOpen(
-      stateDriver, options.stateTable != NULL ? options.stateTable
-                                              : "migrations_state",
-      options.lockTimeout, options.lockInterval,
-      options.dryRun || strcmp(options.command, "check") == 0);
-
-  if (driver->state == NULL) {
-    dbmSay(stderr, TEXT`[ERROR] could not open the state table: ${stateDriver->error}\n`);
-    dbmClose(stateDriver);
-    dbmClose(driver);
-    return 1;
-  }
 
   /* `up --check` is node's way of asking `check` */
   if (options.checkOnly && options.command in {"up", "sync"})
@@ -702,8 +730,46 @@ int dbmCli(int argc, char **argv) {
   else
     answer = dbmCheck(driver);
 
-  dbmStateClose(driver->state);
-  dbmClose(stateDriver);
-  dbmClose(driver);
+  disconnected(driver, stateDriver);
   return answer == 0 ? 0 : 1;
+}
+
+int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
+                 size_t room) {
+
+  static const dbm_options_t defaults = {0};
+
+  if (options == NULL)
+    options = &defaults;
+
+  why[0] = '\0';
+
+  /* a copy, since the tunnel puts another in its place and frees this one */
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_doc_set_root(doc, yyjson_val_mut_copy(doc, config.node));
+
+  json_t own = meta_jsonFromMut(doc);
+  defer own.releaseAt();
+
+  dbm_tunnel_t *tunnel = NULL;
+
+  if (!dbmTunnelOpen(&own, &tunnel, why, room))
+    return -1;
+
+  defer dbmTunnelClose(tunnel);
+
+  driver_t *stateDriver;
+  driver_t *driver = connected(own, options, false, &stateDriver, why, room);
+
+  if (driver == NULL)
+    return -1;
+
+  int answer = dbmUp(driver, 0, NULL, false);
+
+  disconnected(driver, stateDriver);
+
+  if (answer != 0)
+    dbmWrite(why, room, TEXT`${dbmLastError()[0] != '\0' ? dbmLastError() : "migrating failed"}`);
+
+  return answer == 0 ? 0 : -1;
 }

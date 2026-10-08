@@ -405,6 +405,32 @@ void dbmUseScope(const char *scope);
 int dbmCheck(driver_t *driver);
 
 /**
+ * What dbmMigrateUp is told besides the connection; zeroed is node's
+ * defaults: tables `migrations` and `migrations_state`, a lock taken over
+ * after 60000 ms untouched, looked at every 1000 ms.
+ */
+typedef struct {
+  const char *migrationTable;
+  const char *stateTable;
+  long lockTimeout;
+  long lockInterval;
+  bool verbose;
+} dbm_options_t;
+
+/**
+ * Every migration this program has that the database has not run, as
+ * `up` does it: a connection, a second one for node's state, the lock with
+ * its heartbeat, the migrations, and everything closed again. For a program
+ * that migrates itself when it starts, with the migrations compiled in.
+ *
+ * `config` is one connection, as an environment of database.json says it,
+ * `tunnel` included; it is not released. Blocks until it is done. Answers 0,
+ * or -1 with the reason in `why`.
+ */
+int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
+                 size_t room);
+
+/**
  * `db-migrate up -e dev --count 2`, read the way node db-migrate reads it:
  * database.json in the working directory or `--config`, the environment from
  * `-e` or `NODE_ENV` or `dev`, and `DATABASE_URL` when there is no file.
