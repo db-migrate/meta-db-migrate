@@ -4,6 +4,9 @@
 # the variable METALANGUAGE_REPOSITORY names (owner/name), at
 # METALANGUAGE_REF, with the token in the secret METALANGUAGE_TOKEN when that
 # repository is private - and built here.
+#
+# compat moves a project between node db-migrate and this, both ways, against
+# node-db-migrate and its pg driver as published (NODE_DB_MIGRATE_REF).
 name: ci
 
 on:
@@ -23,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins]
+        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, compat]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +46,31 @@ jobs:
             libmysqlclient-dev libsqlite3-dev libyaml-dev sqlite3 \
             postgresql-client mysql-client openssh-server
 
+      - if: matrix.suite == 'compat'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - if: matrix.suite == 'compat'
+        uses: actions/checkout@v4
+        with:
+          repository: db-migrate/node-db-migrate
+          ref: ${{ vars.NODE_DB_MIGRATE_REF || 'master' }}
+          path: node-db-migrate
+
+      - if: matrix.suite == 'compat'
+        uses: actions/checkout@v4
+        with:
+          repository: db-migrate/pg
+          ref: ${{ vars.NODE_PG_REF || 'master' }}
+          path: pg
+
+      - if: matrix.suite == 'compat'
+        name: node dependencies
+        run: |
+          (cd node-db-migrate && npm install --omit=dev --no-audit --no-fund)
+          (cd pg && npm install --omit=dev --no-audit --no-fund)
+
       - name: meta
         working-directory: metalanguage
         run: cmake . >/dev/null && make -j"$(nproc)" meta
@@ -50,7 +78,7 @@ jobs:
       - name: databases
         run: |
           case ${{ matrix.suite }} in
-            pg|plugins)
+            pg|plugins|compat)
               docker run -d --name dbm-meta-pg -e POSTGRES_PASSWORD=dbm \
                 -e POSTGRES_DB=dbm -p 127.0.0.1:55432:5432 postgres:12-alpine
               until pg_isready -q -h 127.0.0.1 -p 55432; do sleep 1; done ;;
@@ -80,8 +108,10 @@ jobs:
       - name: test
         working-directory: meta-db-migrate
         run: |
+          export NODE_DB_MIGRATE="$GITHUB_WORKSPACE/node-db-migrate"
+          export NODE_PG="$GITHUB_WORKSPACE/pg"
           case ${{ matrix.suite }} in
-            options|plugins) test/${{ matrix.suite }}.sh ;;
+            options|plugins|compat) test/${{ matrix.suite }}.sh ;;
             *) test/run.sh ${{ matrix.suite }} ;;
           esac
 
