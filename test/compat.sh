@@ -1,17 +1,19 @@
 #!/bin/sh
 #
-# node db-migrate and this, against the same PostgreSQL database: the state
-# one of them leaves is the state the other carries on from.
+# Moving a project from node db-migrate to this, or back: the database one
+# of them migrated is carried on by the other. Not the migrations - one has
+# them in JavaScript, the other compiled - but what is in the database: the
+# migrations table, and node's state, from which a v2 migration is undone.
 #
 #   test/compat.sh
 #
-# Needs node, and the node-db-migrate and pg driver checkouts beside this one
-# (NODE_DB_MIGRATE and NODE_PG to put them elsewhere), and the PostgreSQL that
-# test/run.sh uses.
+# Needs node, and checkouts of node-db-migrate and its pg driver with their
+# dependencies installed - beside this one, or where NODE_DB_MIGRATE and
+# NODE_PG say - and the PostgreSQL that test/run.sh uses.
 #
-#   node up    -> meta down  -> node up      a v2 migration's learned state
-#   meta up    -> node down  -> meta up      the same, the other way round
-#   meta holds the lock      -> node waits   the lock is the same lock
+# Each direction: the old tool migrates the first two, the new one takes
+# over - runs only the third, and undoes all three, the old tool's v2
+# migration from what the old tool recorded.
 set -u
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -33,6 +35,14 @@ tables() {
        from pg_tables where schemaname = 'public'"
 }
 
+ran() {
+  sql "select string_agg(name, ',' order by name) from migrations"
+}
+
+state() {
+  sql "select string_agg(key, ',' order by key) from migrations_state"
+}
+
 expect() {
   if [ "$2" = "$3" ]; then
     echo "ok       $1"
@@ -44,16 +54,20 @@ expect() {
   fi
 }
 
+fresh() {
+  psql -h 127.0.0.1 -p 55432 -U postgres -q \
+    -c "drop database if exists compat" -c "create database compat" \
+    >/dev/null 2>&1
+}
+
 "$top/build.sh" >/dev/null || exit 1
 
 rm -rf "$work"
 mkdir -p "$work/node/migrations" "$work/meta/migrations"
 
-psql -h 127.0.0.1 -p 55432 -U postgres -q \
-  -c "drop database if exists compat" -c "create database compat" \
-  >/dev/null 2>&1
+# the same three migrations twice: for node, and in meta
 
-# the same migration twice: once for node, once in meta
+# 1. v2: undone from what it learned
 cat >"$work/node/migrations/20261008160000-pets.js" <<'EOF'
 'use strict';
 exports.migrate = async db => {
@@ -78,7 +92,6 @@ exports.migrate = async db => {
 };
 exports._meta = { version: 2 };
 EOF
-
 cat >"$work/meta/migrations/20261008160000-pets.c" <<'EOF'
 #include <db_migrate.h>
 
@@ -99,19 +112,25 @@ static int migrate(schema_t *db) {
 DBM_MIGRATION_V2(migrate)
 EOF
 
-# a v1 migration that takes a while, for the lock
-cat >"$work/meta/migrations/20261008170000-slow.c" <<'EOF'
-#include <db_migrate.h>
-static int up(migrator_t *db) { return db->runSql("select pg_sleep(4)"); }
-static int down(migrator_t *db) { (void)db; return 0; }
-DBM_MIGRATION(up, down)
-EOF
-cat >"$work/node/migrations/20261008170000-slow.js" <<'EOF'
+# 2. and 3. v1, with an up and a down
+for pair in 20261008170000-tags:tags 20261008180000-visits:visits; do
+  name=${pair%%:*}
+  table=${pair##*:}
+  cat >"$work/node/migrations/$name.js" <<EOF
 'use strict';
-exports.up = db => db.runSql('select 1');
-exports.down = () => Promise.resolve();
+exports.up = db => db.createTable('$table', { id: { type: 'int', primaryKey: true } });
+exports.down = db => db.dropTable('$table');
 exports._meta = { version: 1 };
 EOF
+  cat >"$work/meta/migrations/$name.c" <<EOF
+#include <db_migrate.h>
+static int up(migrator_t *db) {
+  return db->createTable("$table", {id: {type: "int", primaryKey: true}});
+}
+static int down(migrator_t *db) { return db->dropTable("$table"); }
+DBM_MIGRATION(up, down)
+EOF
+done
 
 echo '{"name": "compat", "version": "1.0.0"}' >"$work/node/package.json"
 cat >"$work/node/database.json" <<EOF
@@ -123,46 +142,38 @@ cat >"$work/meta/database.json" <<'EOF'
  "user": "postgres", "password": "dbm", "database": "compat"}}
 EOF
 
-node_up() { (cd "$work/node" && node "$node_dbm/bin/db-migrate" up "$@"); }
-node_down() { (cd "$work/node" && node "$node_dbm/bin/db-migrate" down "$@"); }
-meta_up() { (cd "$work/meta" && "$meta" up "$@"); }
-meta_down() { (cd "$work/meta" && "$meta" down "$@"); }
+run_node() { (cd "$work/node" && node "$node_dbm/bin/db-migrate" "$@"); }
+run_meta() { (cd "$work/meta" && "$meta" "$@"); }
 
-# node's state, undone by this
-node_up 20261008160000 >/dev/null 2>&1
-expect "node migrates" "migrations,migrations_state,owners,pets" "$(tables)"
-meta_down >/dev/null 2>&1
-expect "this undoes node's v2 migration from node's state" \
-  "migrations,migrations_state" "$(tables)"
-expect "and leaves node's state as node leaves it" \
-  "__dbmigrate_schema__,__dbmigrate_state__" \
-  "$(sql "select string_agg(key, ',' order by key) from migrations_state")"
-node_up 20261008160000 >/dev/null 2>&1
-expect "on which node migrates again" "migrations,migrations_state,owners,pets" \
-  "$(tables)"
-node_down >/dev/null 2>&1
+all="/20261008160000-pets,/20261008170000-tags,/20261008180000-visits"
+everything="migrations,migrations_state,owners,pets,tags,visits"
+empty="migrations,migrations_state"
+internal="__dbmigrate_schema__,__dbmigrate_state__"
 
-# this state, undone by node
-meta_up 20261008160000 >/dev/null 2>&1
-expect "this migrates" "migrations,migrations_state,owners,pets" "$(tables)"
-node_down >/dev/null 2>&1
-expect "node undoes this v2 migration from this state" \
-  "migrations,migrations_state" "$(tables)"
-meta_up 20261008160000 >/dev/null 2>&1
-expect "on which this migrates again" "migrations,migrations_state,owners,pets" \
-  "$(tables)"
+# one direction: $1 migrated so far, $2 takes over
+transition() {
+  old=$1
+  new=$2
 
-# the lock: node waits while this holds it
-meta_up --lock-timeout 3000 --lock-interval 300 >"$work/meta.out" 2>&1 &
-sleep 1
-node_up --lock-timeout 3000 --lock-interval 300 >"$work/node.out" 2>&1
-wait
-expect "node waits for the lock this holds" 1 \
-  "$(grep -c 'Waiting for the migration lock' "$work/node.out")"
-expect "and takes nothing over while the heartbeat beats" 0 \
-  "$(grep -c 'stale' "$work/node.out")"
-expect "and finds the work done when it gets it" 1 \
-  "$(grep -c 'Nothing to run\|No migrations to run' "$work/node.out")"
+  fresh
+  "run_$old" up 20261008170000 >/dev/null 2>&1
+  expect "$old migrates the first two" \
+    "migrations,migrations_state,owners,pets,tags" "$(tables)"
+
+  "run_$new" up >"$work/$new.up" 2>&1
+  expect "$new takes over and runs only the third" "$all $everything" \
+    "$(ran) $(tables)"
+
+  "run_$new" reset >"$work/$new.reset" 2>&1
+  expect "and undoes all three, $old's v2 migration from $old's state" \
+    "$empty" "$(tables)"
+  expect "leaving the state as $old leaves it" "$internal" "$(state)"
+}
+
+echo "-- node db-migrate to this"
+transition node meta
+echo "-- this to node db-migrate"
+transition meta node
 
 echo "$failed failed"
 [ "$failed" -eq 0 ]
