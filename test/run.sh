@@ -143,6 +143,19 @@ slugColumn() {
   esac
 }
 
+# whether a database of that name exists on the server: 1 or 0
+databaseExists() {
+  case $driver in
+    pg)
+      sql "select count(*) from pg_database where datname = '$1'" ;;
+    cockroachdb)
+      sql "select count(*) from [show databases] where database_name = '$1'" ;;
+    mysql)
+      sql "select count(*) from information_schema.schemata
+           where schema_name = '$1'" ;;
+  esac
+}
+
 # a failure keeps its DDL on MySQL: it commits before every statement of it
 halfDone() {
   case $driver in
@@ -299,6 +312,19 @@ for driver in $drivers; do
     "[INFO] 0 migration(s) to run" "$(tail -1 "$work/check.out")"
 
   "$app" reset -e "$driver" >/dev/null 2>&1
+
+  # db:create and db:drop, twice each, as node allows
+  if [ "$driver" != sqlite3 ]; then
+    "$app" db:create dbm_scratch -e "$driver" >/dev/null 2>&1
+    "$app" db:create dbm_scratch -e "$driver" >/dev/null 2>&1
+    expect "db:create makes one, and again is fine" "0 1" \
+      "$? $(databaseExists dbm_scratch)"
+    "$app" db:drop dbm_scratch -e "$driver" >/dev/null 2>&1
+    "$app" db:drop dbm_scratch -e "$driver" >/dev/null 2>&1
+    expect "db:drop removes it, and again is fine" "0 0" \
+      "$? $(databaseExists dbm_scratch)"
+  fi
+
   cd "$here"
 done
 
