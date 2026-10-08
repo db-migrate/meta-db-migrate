@@ -1,0 +1,131 @@
+#!/bin/sh
+#
+# Builds everything under build/:
+#
+#   libdbmigrate.a          the core and the runtime
+#   libdbmigrate-<d>.a      one driver, for a program that links it
+#   libdbmigrate-<d>.so     the same driver, for the launcher to load
+#   meta-migrate            the development launcher
+#
+# The drivers are whatever is in src/drivers/: pg, cockroachdb (which is pg
+# and its own differences), mysql, sqlite3.
+#
+# Every source is meta, so each one is lowered to C first and the C compiler
+# only ever sees the lowered files. The runtime is the two objects meta's own
+# programs link: the task scheduler and yyjson.
+#
+#   ./build.sh
+#   META_ROOT=/path/to/metalanguage ./build.sh
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH= cd -- "${META_ROOT:-$here/../../metalanguage}" && pwd)
+meta="$root/meta"
+out="$here/build"
+cc=${CC:-cc}
+flags="-std=gnu11 -Wall -Wextra -Werror -g ${CFLAGS:-}"
+
+mkdir -p "$out/lowered" "$out/obj"
+
+lower() {
+  # $1 source, $2 lowered file, the rest handed to meta
+  source=$1
+  lowered=$2
+  shift 2
+
+  if ! "$meta" -s -emit "$lowered" -I "$here/include" "$@" "$source" \
+      >"$lowered.log" 2>&1; then
+    echo "lowering $source failed:" >&2
+    cat "$lowered.log" >&2
+    exit 1
+  fi
+
+  if grep -q "^#error meta cannot write back" "$lowered"; then
+    echo "meta could not write back part of $source:" >&2
+    grep "^#error" "$lowered" >&2
+    exit 1
+  fi
+}
+
+compile() {
+  # $1 lowered file, $2 object
+  # src/drivers too: a lowered driver no longer sits beside pg_driver.h
+  $cc $flags -fPIC -I "$here/include" -I "$here/src/drivers" \
+      -I "$root/runtime/include" -c "$1" -o "$2"
+}
+
+core=""
+for source in "$here"/src/*.c; do
+  name=$(basename "$source" .c)
+  lower "$source" "$out/lowered/$name.c"
+  compile "$out/lowered/$name.c" "$out/obj/$name.o"
+  core="$core $out/obj/$name.o"
+done
+
+drivers=""
+for source in "$here"/src/drivers/*.c; do
+  [ -f "$source" ] || continue
+  name=$(basename "$source" .c)
+  lower "$source" "$out/lowered/driver-$name.c"
+  compile "$out/lowered/driver-$name.c" "$out/obj/driver-$name.o"
+  drivers="$drivers $out/obj/driver-$name.o"
+done
+
+# the runtime, once
+$cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} -I "$root/runtime/include" \
+    -c "$root/runtime/meta_tasks.c" -o "$out/obj/meta_tasks.o"
+$cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} \
+    -c "$root/runtime/vendor/yyjson/yyjson.c" -o "$out/obj/yyjson.o"
+runtime="$out/obj/meta_tasks.o $out/obj/yyjson.o"
+
+rm -f "$out"/libdbmigrate*.a
+ar rcs "$out/libdbmigrate.a" $core $runtime
+
+# what each driver is made of, and what it needs from the system
+objectsOf() {
+  case $1 in
+    cockroachdb) echo "$out/obj/driver-pg.o $out/obj/driver-cockroachdb.o" ;;
+    *) echo "$out/obj/driver-$1.o" ;;
+  esac
+}
+
+librariesOf() {
+  case $1 in
+    pg|cockroachdb) echo "-lpq" ;;
+    mysql) echo "-lmysqlclient" ;;
+    sqlite3) echo "-lsqlite3" ;;
+  esac
+}
+
+# each driver twice: an archive for a program that links it, and a shared
+# object for the launcher, whose core symbols come from the launcher itself
+names=$(for object in $drivers; do
+  basename "$object" .o | sed 's/^driver-//'
+done)
+
+for driver in $names; do
+  ar rcs "$out/libdbmigrate-$driver.a" $(objectsOf $driver)
+  $cc $flags -shared -o "$out/libdbmigrate-$driver.so" $(objectsOf $driver) \
+      $(librariesOf $driver)
+done
+
+# for build-app.sh, so it does not have to know the table above
+for driver in $names; do
+  echo "$driver $(librariesOf $driver)"
+done >"$out/drivers.txt"
+
+# the launcher: the core and the runtime, exported for the migrations and
+# the drivers it opens, and no driver of its own
+if [ -f "$here/tools/meta-migrate.c" ]; then
+
+  lower "$here/tools/meta-migrate.c" "$out/lowered/meta-migrate.c" \
+      -D "DBM_META_ROOT=\"$root\"" \
+      -D "DBM_INCLUDE_DIR=\"$here/include\"" \
+      -D "DBM_DRIVER_DIR=\"$out\""
+  compile "$out/lowered/meta-migrate.c" "$out/obj/meta-migrate.o"
+  $cc $flags -rdynamic -o "$out/meta-migrate" "$out/obj/meta-migrate.o" \
+      $core $runtime -ldl -lpthread
+
+fi
+
+echo "built $out: libdbmigrate.a, drivers:" $names
