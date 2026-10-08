@@ -1,3 +1,36 @@
+## 0.3.0 (2026-10-09)
+
+What node db-migrate changed up to 1.0.0-beta.38 and since, followed.
+
+### Features
+
+* **v2:** a run that dies halfway is resumed by the next one, as node does
+  it: the lock row says which migration runs which way, and for every step
+  whether it started, was learned and was done, with the file's hash. By
+  default the steps that ran are skipped; `DBM_MIGRATION_V2_RECOVERY(migrate,
+  "rollback")` undoes them and runs it again; a run that was rolling back is
+  rolled back further; a changed file is not skipped blind. Works with node:
+  either resumes what the other left
+* **log:** a failed migration says which one, at which step, the statement
+  with a marker at the position the database names, and the driver's
+  diagnostic fields - pg's code, detail, hint and the rest, mysql's errno and
+  SQL state, SQLite's code
+* **cli:** `seed`, `undo-seed` and `reset-seed` say that seeders are not
+  supported, as node 1.0 does
+
+### Bug Fixes
+
+* **v2:** a failure is rolled back by exactly the steps that reached the
+  database, the failed one included if its table or column was made before a
+  foreign key failed - every undo step carries its step number (`n`)
+* **v2:** removing a second column, index or foreign key from one table in a
+  migration no longer forgets the first, so its rollback can put it back
+* **state:** writing the lock row keeps every field in it, node's included,
+  instead of only the ones this knew
+* **sqlite3:** a busy timeout (`busyTimeout`, 10000 ms), so the migrations'
+  connection and the state's do not fail with "database is locked" when they
+  write at once
+
 ## 0.2.0 (2026-10-09)
 
 ### Features
