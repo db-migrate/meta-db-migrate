@@ -73,8 +73,19 @@ DBM_MIGRATION_V2(migrate)
 ```
 
 Like in node, it runs outside a transaction. Every step is recorded in
-`migrations_state` before the next one starts, and a failure is undone step by
-step.
+`migrations_state` before the next one starts, together with how far it got:
+started, its undoing recorded (`learned`), sent to the database (`done`).
+
+- **A failure** is undone by exactly the steps that reached the database. That
+  includes the failed step itself if its table or column was made before a
+  foreign key failed.
+- **A run that dies halfway** is resumed by the next one, as in node since
+  1.0.0-beta.38. By default the steps that ran are skipped and the rest runs.
+  A migration that says `DBM_MIGRATION_V2_RECOVERY(migrate, "rollback")`
+  (node's `_meta.recovery`) is undone instead and run again. A run that was
+  rolling back when it died is rolled back further. A file changed since is
+  not skipped blind. This also works across the two tools: node can resume
+  a run this one left, and the other way round.
 
 Migrations can also be plain SQL, as node's `create --sql-file` creates them:
 `migrations/sqls/<stamp>-<name>-up.sql` and `-down.sql`. No code file is
@@ -121,6 +132,19 @@ While it migrates, a process holds node's migration lock: the
 lock over after the row has stayed unchanged for the whole timeout (60 s by
 default), measured on its own monotonic clock. The state lives on a
 connection of its own, so it survives a migration's rollback.
+
+A failed migration is reported the way node reports it since 1.0.0-beta.38:
+which migration failed, at which step for v2, the message, the statement
+with a marker under the position the database names, and the driver's
+diagnostic fields (`code`, `detail`, `hint`, ...):
+
+```
+[ERROR] Migration "20261009100000-broken" failed: relation "nope_table" does not exist
+    SQL: select *
+           from nope_table
+                ^
+    code: 42P01
+```
 
 Scopes are subfolders of `migrations/`. Their migrations are recorded as
 `billing/<name>` and those at the top level as `/<name>`, exactly as in node.
@@ -275,7 +299,7 @@ writes. See `include/db_migrate_driver.h`.
 | `pg` | `host`, `port`, `user`, `password`, `database`, `sslmode` | sequences, enums (`db_migrate/pg.h`) | DDL is transactional |
 | `cockroachdb` | as pg | additionally `changePrimaryKey`, `uuid` keys, computed columns, row TTL (`db_migrate/cockroachdb.h`) | extends pg. A column added to an existing table cannot be used until its transaction commits, so adding a column and filling it are two migrations |
 | `mysql` | `host`, `port`, `user`, `password`, `database`, `socketPath` | table options (`engine`, `charset`), `unsigned`, `after`, `comment` | MySQL commits before every DDL statement. A failed migration keeps the DDL it already ran, only its record is rolled back |
-| `sqlite3` | `filename` | – | foreign keys are written into the column (`REFERENCES`). Changing a column in place is not possible and is refused with a reason |
+| `sqlite3` | `filename`, `busyTimeout` (ms, 10000) | – | foreign keys are written into the column (`REFERENCES`). Changing a column in place is not possible and is refused with a reason |
 
 `cockroachdb` extends `pg` the way db-migrate-cockroachdb extends db-migrate-pg:
 `dbmPgConnect` returns a fully configured pg driver, and Cockroach replaces
@@ -290,6 +314,7 @@ test/plugins.sh               # yaml, plugins/, the ssh tunnel (own sshd)
 test/options.sh               # --ignore-on-init, --log-level, dry runs
 test/static.sh                # build-app --static: glibc only, on bare Debian/Fedora
 test/embed.sh                 # dbmMigrateUp from a shared object with its own runtime
+test/recovery.sh              # v2 runs that die or fail halfway, resumed and rolled back
 test/compat.sh                # moving a project from node db-migrate and back
 ```
 
@@ -316,7 +341,7 @@ META_ROOT=/opt/meta ./build.sh
 `META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
-`plugins.sh`, `static.sh`, `embed.sh` and `compat.sh`. The last one moves a project from node
+`plugins.sh`, `static.sh`, `embed.sh`, `recovery.sh` and `compat.sh`. The last one moves a project from node
 db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
 
