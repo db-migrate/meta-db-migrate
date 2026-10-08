@@ -23,7 +23,8 @@ shift 2
 drivers=${*:-pg}
 work="$here/build/app-$(basename "$app")"
 cc=${CC:-cc}
-flags="-std=gnu11 -Wall -Wextra -Werror -g ${CFLAGS:-}"
+# a migration just created is up and down returning 0, and its db unused
+flags="-std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -g ${CFLAGS:-}"
 
 "$here/build.sh" >/dev/null
 
