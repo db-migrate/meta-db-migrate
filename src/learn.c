@@ -429,8 +429,8 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
         return fail(self, TEXT`There is no such column recreation strategy "${strategy}!"`);
     }
 
-    yyjson_mut_val *was = yyjson_mut_obj(mod);
-    yyjson_mut_obj_put(child(mod, kept, "c"), yyjson_mut_strcpy(mod, t), was);
+    /* beside what the migration removed from this table before, not over it */
+    yyjson_mut_val *was = child(mod, child(mod, kept, "c"), t);
 
     if (notNull && !self->unlearn && strcmp(strategy, "delay") == 0) {
 
@@ -543,10 +543,9 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (index == NULL)
       return fail(self, TEXT`There is no index ${step->name} in ${t} table!`);
 
-    yyjson_mut_val *was = yyjson_mut_obj(mod);
+    yyjson_mut_val *was = child(mod, child(mod, kept, "i"), t);
 
     put(mod, was, step->name, index);
-    yyjson_mut_obj_put(child(mod, kept, "i"), yyjson_mut_strcpy(mod, t), was);
     removeKey(yyjson_mut_obj_get(i, t), step->name);
 
     const char *args[] = {t, step->name};
@@ -587,10 +586,9 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (key == NULL)
       return fail(self, TEXT`There is no foreign key ${step->name} in ${t} table!`);
 
-    yyjson_mut_val *was = yyjson_mut_obj(mod);
+    yyjson_mut_val *was = child(mod, child(mod, kept, "f"), t);
 
     put(mod, was, step->name, key);
-    yyjson_mut_obj_put(child(mod, kept, "f"), yyjson_mut_strcpy(mod, t), was);
     removeKey(yyjson_mut_obj_get(f, t), step->name);
 
     /* node records nothing here, and so could not put the key back */
