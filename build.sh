@@ -28,13 +28,21 @@ flags="-std=gnu11 -Wall -Wextra -Werror -g ${CFLAGS:-}"
 
 mkdir -p "$out/lowered" "$out/obj"
 
+# where the system keeps the client libraries' headers: Debian and Ubuntu put
+# libpq-fe.h under /usr/include/postgresql, which no compiler looks in
+system=""
+for package in libpq mysqlclient libmariadb sqlite3 yaml-0.1; do
+  system="$system $(pkg-config --cflags-only-I "$package" 2>/dev/null || true)"
+done
+
 lower() {
   # $1 source, $2 lowered file, the rest handed to meta
   source=$1
   lowered=$2
   shift 2
 
-  if ! "$meta" -s -emit "$lowered" -I "$here/include" "$@" "$source" \
+  # $system unquoted: it is a list of -I flags, or nothing
+  if ! "$meta" -s -emit "$lowered" -I "$here/include" $system "$@" "$source" \
       >"$lowered.log" 2>&1; then
     echo "lowering $source failed:" >&2
     cat "$lowered.log" >&2
@@ -52,7 +60,7 @@ compile() {
   # $1 lowered file, $2 object
   # src/drivers too: a lowered driver no longer sits beside pg_driver.h
   $cc $flags -fPIC -I "$here/include" -I "$here/src/drivers" \
-      -I "$root/runtime/include" -c "$1" -o "$2"
+      -I "$root/runtime/include" $system -c "$1" -o "$2"
 }
 
 core=""
