@@ -43,6 +43,7 @@ typedef struct {
   bool countGiven;
   bool dryRun;
   bool sqlFile;
+  bool v2File;
   const char *template;
   bool verbose;
   bool noTransactions;
@@ -74,7 +75,7 @@ commands:
   fix                rebuild node's state from the v2 migrations that ran
                      (--backup-state keeps the old one)
   create name        a new migration in migrations/
-                     (--sql-file or --template NAME for another kind)
+                     (--sql-file, --v2-file or --template NAME for another kind)
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
   db:create name     a database, if it is not there yet
@@ -94,6 +95,7 @@ options:
   -v, --verbose               print every statement as it is sent
   --non-transactional         no transaction around a migration
   --sql-file                  create: an up and a down .sql file instead
+  --v2-file                   create: a v2 migration, undone by what it learns
   --template NAME             create: what the plugin of that name writes
   -i, --version               print the version
   -h, --help                  this
@@ -146,6 +148,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->dryRun = true;
     else if (strcmp(word, "--sql-file") == 0)
       into->sqlFile = true;
+    else if (strcmp(word, "--v2-file") == 0)
+      into->v2File = true;
     else if (strcmp(word, "--template") == 0 && hasNext)
       into->template = argv[++i];
     else if (word[0] == '-') {
@@ -445,7 +449,17 @@ static int create(const options_t *options) {
     return 1;
   }
 
-  dbmSay(file, TEXT`#include <db_migrate.h>
+  if (options->v2File)
+    dbmSay(file, TEXT`#include <db_migrate.h>
+
+static int migrate(schema_t *db) {
+  return 0;
+}
+
+DBM_MIGRATION_V2(migrate)
+`);
+  else
+    dbmSay(file, TEXT`#include <db_migrate.h>
 
 static int up(migrator_t *db) {
   return 0;
