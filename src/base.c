@@ -255,6 +255,90 @@ static bool terminated(const char *sql) {
   return length > 0 && sql[length - 1] == ';';
 }
 
+static void forgetFailure(driver_t *self) {
+  free(self->failedSql);
+  self->failedSql = NULL;
+  self->failedPosition = 0;
+  self->failedFields[0] = '\0';
+}
+
+static void rememberFailure(driver_t *self, const char *sql) {
+  if (self->failedSql == NULL && sql != NULL)
+    self->failedSql = strdup(sql);
+}
+
+void dbmFailedField(driver_t *self, const char *name, const char *value) {
+
+  size_t used = strlen(self->failedFields);
+
+  if (value == NULL || value[0] == '\0')
+    return;
+
+  dbmWrite(self->failedFields + used, sizeof self->failedFields - used,
+           TEXT`    ${name}: ${value}\n`);
+}
+
+/** The statement, indented, with `^` under the 1-based `position`. */
+static void statementFor(dbm_text_t *out, const char *sql, long position) {
+
+  size_t length = strlen(sql);
+  long at = 0;
+  long row = 0;
+  long column = 0;
+  bool marked = position >= 1 && (size_t)position <= length + 1;
+
+  /* where the position is, as row and column - tabs kept, for the marker */
+  for (long i = 0; marked && i < position - 1; ++i) {
+    if (sql[i] == '\n') {
+      ++row;
+      column = 0;
+    } else {
+      ++column;
+    }
+  }
+
+  while (length > 0 && strchr(" \t\r\n", sql[length - 1]) != NULL)
+    --length;
+
+  for (long line = 0; (size_t)at < length; ++line) {
+
+    size_t end = strcspn(sql + at, "\n");
+
+    if ((size_t)at + end > length)
+      end = length - (size_t)at;
+
+    out->put(line == 0 ? "    SQL: " : "         ");
+    out->putn(sql + at, end);
+    out->put("\n");
+
+    if (marked && line == row) {
+      out->put("         ");
+      for (long c = 0; c < column; ++c)
+        out->put(sql[at + c] == '\t' ? "\t" : " ");
+      out->put("^\n");
+    }
+
+    at += (long)end + 1;
+  }
+}
+
+void dbmSayFailure(driver_t *self, const char *migration,
+                   const char *instruction, const char *message) {
+
+  dbm_text_t said = {0};
+  defer said.release();
+
+  said.append(TEXT`[ERROR] Migration "${migration}" failed${instruction != NULL ? " " : ""}${instruction != NULL ? instruction : ""}: ${message}\n`);
+
+  if (self->failedSql != NULL)
+    statementFor(&said, self->failedSql, self->failedPosition);
+
+  said.put(self->failedFields);
+
+  if (!said.failed)
+    dbmSay(stderr, TEXT`${said.text}`);
+}
+
 int dbmSend(driver_t *self, dbm_text_t *sql) {
 
   if (sql->failed)
@@ -270,7 +354,13 @@ int dbmSend(driver_t *self, dbm_text_t *sql) {
   if (self->verbose)
     dbmSay(stdout, TEXT`[SQL] ${sql->text}\n`);
 
-  return self->runSql(self, sql->text);
+  forgetFailure(self);
+
+  if (self->runSql(self, sql->text) == 0)
+    return 0;
+
+  rememberFailure(self, sql->text);
+  return -1;
 }
 
 int dbmQuery(driver_t *self, const sql_t *query, json_t *rows) {
@@ -284,7 +374,13 @@ int dbmQuery(driver_t *self, const sql_t *query, json_t *rows) {
   if (self->verbose)
     dbmSay(stdout, TEXT`[SQL] ${query->text} -- ${query->count} parameter(s)\n`);
 
-  return self->query(self, query, rows);
+  forgetFailure(self);
+
+  if (self->query(self, query, rows) == 0)
+    return 0;
+
+  rememberFailure(self, query->text);
+  return -1;
 }
 
 /* ------------------------------------------------------------------ */

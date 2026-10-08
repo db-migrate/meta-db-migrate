@@ -84,6 +84,9 @@ struct schema_t {
   const dbm_interrupted_t *recovery;
   const char *name;
 
+  /** The step being run, as the log says it: addColumn("pets", "age"). */
+  char current[600];
+
   bool failed;
   char error[512];
 };
@@ -759,9 +762,9 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
 
   int op = self->counter + 1;
   const dbm_interrupted_t *recovery = self->recovery;
-  char what[600];
+  char *what = self->current;
 
-  described(action, step, what, sizeof what);
+  described(action, step, what, sizeof self->current);
 
   /* resuming: what the interrupted run did is in the database and the state */
   if (recovery != NULL && op <= recovery->done) {
@@ -1340,9 +1343,16 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
   if (db.failed) {
 
     char reason[512];
+    char instruction[700] = "";
+
+    /* "at" the step that failed, "after" the last one when the code failed */
+    if (db.counter > 0)
+      dbmWrite(instruction, sizeof instruction, TEXT`${db.done >= db.counter ? "after" : "at"} step ${(long)db.counter} ${db.current}`);
 
     dbmWrite(reason, sizeof reason, TEXT`${db.error}`);
-    dbmSay(stderr, TEXT`[ERROR] Migration "${db.key}" failed at step ${(long)db.counter}, rolling back: ${reason}\n`);
+    dbmSayFailure(driver, db.key, instruction[0] != '\0' ? instruction : NULL,
+                  reason);
+    dbmSay(stderr, TEXT`[INFO] Rolling back ${db.key}\n`);
 
     /* the steps that ran, and the failed one if its table or column is there */
     keepExecuted(&db, db.done, db.counter, !db.sent && driver->signaled);
@@ -1350,7 +1360,8 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
     if (rollBack(&db))
       dbmSay(stderr, TEXT`[ERROR] and undoing it failed too: ${db.error}\n`);
 
-    dbmWrite(why, room, TEXT`${reason}`);
+    /* said above, with its statement - `why` stays empty for the walker */
+    why[0] = '\0';
     yyjson_mut_doc_free(db.record);
     return -1;
   }

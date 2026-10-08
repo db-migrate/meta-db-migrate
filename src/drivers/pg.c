@@ -36,6 +36,32 @@ static int judged(driver_t *self, PGresult *result) {
   if (status in {PGRES_COMMAND_OK, PGRES_TUPLES_OK, PGRES_EMPTY_QUERY})
     return 0;
 
+  /* what node's pg driver puts on its error, for dbmSayFailure */
+  static const struct { int code; const char *name; } fields[] = {
+      {PG_DIAG_SQLSTATE, "code"},
+      {PG_DIAG_MESSAGE_DETAIL, "detail"},
+      {PG_DIAG_MESSAGE_HINT, "hint"},
+      {PG_DIAG_CONTEXT, "where"},
+      {PG_DIAG_SCHEMA_NAME, "schema"},
+      {PG_DIAG_TABLE_NAME, "table"},
+      {PG_DIAG_COLUMN_NAME, "column"},
+      {PG_DIAG_DATATYPE_NAME, "dataType"},
+      {PG_DIAG_CONSTRAINT_NAME, "constraint"},
+  };
+
+  for (size_t i = 0; i < sizeof fields / sizeof fields[0]; ++i)
+    dbmFailedField(self, fields[i].name,
+                   PQresultErrorField(result, fields[i].code));
+
+  const char *position = PQresultErrorField(result, PG_DIAG_STATEMENT_POSITION);
+  const char *primary = PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY);
+
+  self->failedPosition = position != NULL ? atol(position) : 0;
+
+  /* the message alone: the statement and its marker are said apart now */
+  if (primary != NULL)
+    return dbmFail(self, TEXT`${primary}`);
+
   return dbmFail(self, TEXT`${PQresultErrorMessage(result)}`);
 }
 

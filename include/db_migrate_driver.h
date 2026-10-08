@@ -61,6 +61,16 @@ struct driver_t {
   bool ignoreOnInit;
 
   /**
+   * The statement that failed last, and what the database said about it
+   * besides its message - node's err.sql, err.position and the diagnostic
+   * fields, as `code: 42P07` lines. Cleared before every statement; a
+   * driver fills the fields and the position, dbmSend the statement.
+   */
+  char *failedSql;
+  long failedPosition;
+  char failedFields[768];
+
+  /**
    * Set by createTable and addColumn once their main statement went through,
    * before the foreign keys that follow it - node's driver signal. A v2
    * migration failing at that step then knows the table or column is there
@@ -396,6 +406,18 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state,
 /** SHA-256 as 64 hex digits; a file's, or false when it cannot be read. */
 void dbmSha256(const void *data, size_t length, char hex[65]);
 bool dbmSha256File(const char *path, char hex[65]);
+
+/** A diagnostic field of the last failure, `name: value`, when it says anything. */
+void dbmFailedField(driver_t *self, const char *name, const char *value);
+
+/**
+ * A failed migration, said the way node says it since 1.0.0-beta.38: which
+ * migration, which step (`instruction`, or NULL), the message, then the
+ * statement with a marker under where the database said it went wrong, and
+ * the driver's diagnostic fields.
+ */
+void dbmSayFailure(driver_t *self, const char *migration,
+                   const char *instruction, const char *message);
 
 /** Runs or, on a dry run, prints. The way every generic version sends SQL. */
 int dbmSend(driver_t *self, dbm_text_t *sql);

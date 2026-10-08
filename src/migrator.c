@@ -552,5 +552,6 @@ void dbmClose(driver_t *driver) {
     return;
 
   driver->close(driver);
+  free(driver->failedSql);
   free(driver);
 }

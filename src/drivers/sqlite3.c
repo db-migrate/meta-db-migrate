@@ -45,8 +45,14 @@ static int liteRunSql(driver_t *self, const char *text) {
       SQLITE_OK)
     return 0;
 
+  sqlite3 *db = connectionOf(self);
+
+  /* the code by its name; no position, which SQLite counts in the one
+     statement of the text that failed, not in the text */
+  dbmFailedField(self, "code", sqlite3_errstr(sqlite3_extended_errcode(db)));
+
   int answer = dbmFail(self, TEXT`${message != NULL ? message
-                                       : sqlite3_errmsg(connectionOf(self))}`);
+                                       : sqlite3_errmsg(db)}`);
 
   sqlite3_free(message);
   return answer;

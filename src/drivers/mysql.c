@@ -45,12 +45,27 @@ static MYSQL *connectionOf(driver_t *self) {
  * the server answers one per statement and stops at the first that fails -
  * and that one is the answer.
  */
+/** The server's words, and its error number and SQL state beside them. */
+static int failed(driver_t *self, MYSQL *db) {
+
+  char number[16];
+
+  dbmWrite(number, sizeof number, TEXT`${(long)mysql_errno(db)}`);
+
+  if (mysql_errno(db) != 0) {
+    dbmFailedField(self, "errno", number);
+    dbmFailedField(self, "sqlState", mysql_sqlstate(db));
+  }
+
+  return dbmFail(self, TEXT`${mysql_error(db)}`);
+}
+
 static int myRunSql(driver_t *self, const char *text) {
 
   MYSQL *db = connectionOf(self);
 
   if (mysql_real_query(db, text, (unsigned long)strlen(text)) != 0)
-    return dbmFail(self, TEXT`${mysql_error(db)}`);
+    return failed(self, db);
 
   for (;;) {
 
@@ -59,12 +74,12 @@ static int myRunSql(driver_t *self, const char *text) {
     if (result != NULL)
       mysql_free_result(result);
     else if (mysql_field_count(db) != 0)
-      return dbmFail(self, TEXT`${mysql_error(db)}`);
+      return failed(self, db);
 
     int more = mysql_next_result(db);
 
     if (more > 0)
-      return dbmFail(self, TEXT`${mysql_error(db)}`);
+      return failed(self, db);
 
     if (more < 0)
       return 0;

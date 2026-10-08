@@ -146,8 +146,11 @@ static int stepV2(driver_t *driver, const dbm_migration_t *migration,
   if (answer == 0 && direction == UP)
     dbmEndV2(driver->state, driver->dryRun);
 
+  /* a migration that failed was said already, with its statement; the
+     rest - the state, a refused recovery - is said here */
   if (answer != 0) {
-    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
+    if (why[0] != '\0')
+      dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
     return -1;
   }
 
@@ -255,7 +258,7 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   }
 
   if (db.failed) {
-    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${db.error}\n`);
+    dbmSayFailure(driver, shown(migration->name), NULL, db.error);
 
     if (!driver->noTransactions && driver->abortMigration(driver))
       dbmSay(stderr, TEXT`[ERROR] and the rollback failed too: ${driver->error}\n`);
