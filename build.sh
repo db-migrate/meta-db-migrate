@@ -18,6 +18,9 @@
 #   ./build.sh
 #   META_ROOT=/path/to/metalanguage ./build.sh
 #   DBM_BUILD_DIR=/elsewhere ./build.sh       instead of build/
+#   DBM_STATIC_DEPS=build/deps ./build.sh     the drivers' shared objects
+#       carry libpq, OpenSSL, SQLite and libyaml (tools/deps.sh) inside them,
+#       so the launcher needs none of them installed - a release does this
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -35,6 +38,13 @@ system=""
 for package in libpq mysqlclient libmariadb sqlite3 yaml-0.1; do
   system="$system $(pkg-config --cflags-only-I "$package" 2>/dev/null || true)"
 done
+
+# the headers of the libraries that will be linked in, before the system's
+deps=${DBM_STATIC_DEPS:-}
+if [ -n "$deps" ]; then
+  deps=$(CDPATH= cd -- "$deps" && pwd)
+  system="-I$deps/include $system"
+fi
 
 lower() {
   # $1 source, $2 lowered file, the rest handed to meta
@@ -119,6 +129,24 @@ librariesOf() {
   esac
 }
 
+# what a driver's shared object carries inside it, with DBM_STATIC_DEPS -
+# hidden, so they meet nothing else the launcher loads; mysql stays dynamic,
+# for libmysqlclient's GPL
+sharedLibrariesOf() {
+  static=""
+  case $1 in
+    pg|cockroachdb) static="-lpq -lpgcommon -lpgport -lssl -lcrypto" ;;
+    sqlite3) static="-lsqlite3" ;;
+    yaml) static="-lyaml" ;;
+  esac
+
+  if [ -n "$deps" ] && [ -n "$static" ]; then
+    echo "-L$deps/lib -Wl,--exclude-libs,ALL -Wl,-Bstatic $static -Wl,-Bdynamic -lpthread -ldl -lm"
+  else
+    librariesOf "$1"
+  fi
+}
+
 # each driver twice: an archive for a program that links it, and a shared
 # object for the launcher, whose core symbols come from the launcher itself
 names=$(for object in $drivers; do
@@ -128,7 +156,7 @@ done)
 for driver in $names; do
   ar rcs "$out/libdbmigrate-$driver.a" $(objectsOf $driver)
   $cc $flags -shared -o "$out/libdbmigrate-$driver.so" $(objectsOf $driver) \
-      $(librariesOf $driver)
+      $(sharedLibrariesOf $driver)
 done
 
 # for build-app.sh, so it does not have to know the table above
