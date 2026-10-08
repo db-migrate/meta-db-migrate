@@ -138,16 +138,61 @@ static int levelOf(const char *text) {
   return 0;
 }
 
+static dbm_logger_t logger;
+static char lastError[512];
+
+void dbmSetLogger(dbm_logger_t to) {
+  logger = to;
+}
+
+const char *dbmLastError(void) {
+  return lastError;
+}
+
 void dbmSay(FILE *to, text_t line) {
 
   char *text = line.owned();
 
-  /* flushed: piped into a CI log, an error stays after the line it is about */
-  if (text != NULL && (levelOf(text) == 0 || dbmLogs(levelOf(text)))) {
-    fputs(text, to);
-    fflush(to);
+  if (text == NULL)
+    return;
+
+  int level = levelOf(text);
+
+  if (level == DBM_LOG_ERROR) {
+    const char *said = text + strlen("[ERROR]");
+    size_t length;
+
+    said += strspn(said, " ");
+    length = strcspn(said, "\n");
+
+    if (length >= sizeof lastError)
+      length = sizeof lastError - 1;
+
+    memcpy(lastError, said, length);
+    lastError[length] = '\0';
   }
 
+  if (level != 0 && !dbmLogs(level)) {
+    free(text);
+    return;
+  }
+
+  /* a file - what create writes - is not a log line */
+  if (logger != NULL && (to == stdout || to == stderr)) {
+
+    size_t length = strlen(text);
+
+    while (length > 0 && text[length - 1] == '\n')
+      text[--length] = '\0';
+
+    logger(level, text);
+    free(text);
+    return;
+  }
+
+  /* flushed: piped into a CI log, an error stays after the line it is about */
+  fputs(text, to);
+  fflush(to);
   free(text);
 }
 

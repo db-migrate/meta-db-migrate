@@ -90,13 +90,28 @@ size_t dbmWrite(char *into, size_t room, text_t text);
 enum { DBM_LOG_INFO = 1, DBM_LOG_WARN = 2, DBM_LOG_ERROR = 4, DBM_LOG_SQL = 8 };
 
 void dbmSetLogLevel(const char *levels);
+bool dbmLogs(int level);
+
+/**
+ * Where the lines go that would go to standard output and standard error:
+ * a program with a log of its own - an nginx module - hands them to it.
+ * `level` is the line's mark (DBM_LOG_INFO, ...), 0 for one without; `line`
+ * has no newline at its end. --log-level still decides which lines come.
+ * It may be called from the lock's heartbeat thread. NULL goes back to the
+ * streams.
+ */
+typedef void (*dbm_logger_t)(int level, const char *line);
+
+void dbmSetLogger(dbm_logger_t logger);
+
+/** The last `[ERROR]` line said, without its mark, or "". */
+const char *dbmLastError(void);
 
 /**
  * The first line of an -up.sql that only runs without --ignore-on-init, as
  * `create --sql-file --ignore-on-init` writes it.
  */
 #define DBM_IGNORE_ON_INIT_MARK "-- db-migrate: ignore-on-init"
-bool dbmLogs(int level);
 
 /** What `up` and `down` are handed. */
 typedef struct {
