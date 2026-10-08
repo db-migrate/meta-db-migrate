@@ -1,0 +1,30 @@
+{
+  "pg": {
+    "driver": "pg",
+    "host": "127.0.0.1",
+    "port": 55432,
+    "user": "postgres",
+    "password": {"ENV": "DBM_TEST_PASSWORD"},
+    "database": "dbm"
+  },
+  "cockroachdb": {
+    "driver": "cockroachdb",
+    "host": "127.0.0.1",
+    "port": 56257,
+    "user": "root",
+    "database": "dbm",
+    "sslmode": "disable"
+  },
+  "mysql": {
+    "driver": "mysql",
+    "host": "127.0.0.1",
+    "port": 53306,
+    "user": "root",
+    "password": {"ENV": "DBM_TEST_PASSWORD"},
+    "database": "dbm"
+  },
+  "sqlite3": {
+    "driver": "sqlite3",
+    "filename": "dbm.sqlite"
+  }
+}
