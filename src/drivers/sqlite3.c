@@ -16,7 +16,8 @@
  *
  * SQLite runs in this process over a file, so there is nothing to wait on and
  * nothing to park. `{filename: "dev.db"}` in database.json, as for node, and
- * `:memory:` works for a test that wants nothing left behind.
+ * `:memory:` works for a test that wants nothing left behind. `busyTimeout`
+ * (ms, 10000) is how long a write waits for the other connection's.
  */
 #include <db_migrate_driver.h>
 
@@ -230,6 +231,15 @@ static driver_t *liteOpen(json_t config, char *why, size_t room) {
     sqlite3_close(db);
     return NULL;
   }
+
+  /**
+   * Two connections write the same file - the migrations' and node's state,
+   * whose lock beats from a thread of its own - so one waits for the other
+   * rather than failing with "database is locked". `busyTimeout` in ms.
+   */
+  long busy = config.busyTimeout.isNothing() ? 10000 : config.busyTimeout.number();
+
+  sqlite3_busy_timeout(db, busy > 0 ? (int)busy : 0);
 
   sqlite_driver_t *driver =
       (sqlite_driver_t *)dbmDriverNew("sqlite3", sizeof(sqlite_driver_t));
