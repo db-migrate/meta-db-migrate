@@ -12,12 +12,14 @@
 # set and has them already. The SBOM also lands beside the tarball, as
 # <tarball without .tar.gz>.cdx.json.
 #
-# meta is not in it. It comes from the image wxone/meta, whose /opt/meta is
-# where the launcher looks for it - and meta has to stay there, since it
-# bakes that path in. The tarball unpacks at /:
+# meta goes in too, as the image wxone/meta has it: the compiler, its runtime
+# headers and libmeta_runtime.a, 1.5 MB. The launcher and build-app.sh need
+# it, and it has to be at <meta> - /opt/meta - since it bakes that path in.
+# The tarball unpacks at /, and the host needs a C compiler beside it:
 #
 #   tar -xzf x.tar.gz -C /
 #
+#   <meta>/                      meta, runtime/include, lib/libmeta_runtime.a
 #   <prefix>/bin/meta-migrate
 #   <prefix>/bin/meta-migrate-build-app
 #   <prefix>/include/            db_migrate.h and the rest
@@ -52,10 +54,13 @@ mkdir -p "$prefix"
 find "$prefix" -mindepth 1 -delete
 mkdir -p "$prefix/bin" "$prefix/include" "$prefix/lib"
 
-# built apart from build/, which stays the development build
+# built apart from build/, which stays the development build, with the
+# static libraries inside the drivers' shared objects
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
-META_ROOT="$meta" DBM_BUILD_DIR="$build" "$here/build.sh"
+deps=${DBM_DEPS:-$build/deps}
+[ -f "$deps/deps.json" ] || "$here/tools/deps.sh" "$deps"
+META_ROOT="$meta" DBM_BUILD_DIR="$build" DBM_STATIC_DEPS="$deps" "$here/build.sh"
 
 cp "$build/meta-migrate" "$prefix/bin/"
 cp "$here/build-app.sh" "$prefix/bin/meta-migrate-build-app"
@@ -63,8 +68,6 @@ cp -r "$here/include/." "$prefix/include/"
 cp "$build"/libdbmigrate*.a "$build"/libdbmigrate-*.so "$build/drivers.txt" \
    "$prefix/lib/"
 
-deps=${DBM_DEPS:-$build/deps}
-[ -f "$deps/deps.json" ] || "$here/tools/deps.sh" "$deps"
 mkdir -p "$prefix/lib/deps"
 cp -r "$deps/lib" "$deps/include" "$deps/deps.json" "$prefix/lib/deps/"
 
@@ -76,6 +79,6 @@ cp "$here/LICENSE" "$here/README.md" "$doc/"
   "$doc/THIRD_PARTY_NOTICES" >/dev/null
 
 mkdir -p "$(dirname "$tarball")"
-tar -czf "$tarball" -C / "${prefix#/}"
+tar -czf "$tarball" -C / "${meta#/}" "${prefix#/}"
 cp "$doc/sbom.cdx.json" "${tarball%.tar.gz}.cdx.json"
 echo "released $tarball"
