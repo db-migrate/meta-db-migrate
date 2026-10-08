@@ -293,28 +293,38 @@ db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
 
 A tag `v*` also builds a release with `tools/release.sh`. The release is a
-tarball that unpacks to `/opt/meta-db-migrate` and contains:
+tarball that unpacks at `/` (`tar -xzf <file> -C /`) and contains:
 
-- the launcher and `bin/meta-migrate-build-app`
-- the libraries, drivers and plugins, and the headers
-- the static libraries for `--static` in `lib/deps`
-- the license, `THIRD_PARTY_NOTICES` and a CycloneDX SBOM in
-  `share/doc/meta-db-migrate`
+- meta in `/opt/meta`, as the image has it: compiler, runtime headers and
+  `libmeta_runtime.a` (1.5 MB). It has to be at that path, and overwrites
+  an `/opt/meta` that is already there. The host only needs a C compiler on
+  top. The launcher's drivers carry their client libraries inside them,
+  except mysql, which needs libmysqlclient installed.
+- in `/opt/meta-db-migrate`:
+  - the launcher and `bin/meta-migrate-build-app`
+  - the libraries, drivers and plugins, and the headers
+  - the static libraries for `--static` in `lib/deps`
+  - the license, `THIRD_PARTY_NOTICES` and a CycloneDX SBOM in
+    `share/doc/meta-db-migrate`
 
 The SBOM is also attached to the GitHub release as a separate file. It lists
-what goes into a program and that no scanner can find there: meta's runtime,
-yyjson, and the static libraries, each with version, license and origin.
+what the release brings and that no scanner can find in a binary: meta and
+its runtime, yyjson, and the static libraries, each with version, license
+and origin.
 
 The name of the tarball says which glibc it needs: built on Ubuntu 24.04,
-it is `glibc2.39`. A release against an older glibc will follow once meta
-learns the compiler it lowers for at run time instead of when it is built.
-meta itself is not in the tarball. It comes from the image, as above.
+it is `glibc2.39`. A release against an older glibc needs a meta that runs
+there too: today's needs glibc 2.34, and is bound to the compiler it was
+built with. Once meta is built on glibc 2.28 and asks the compiler at run
+time, a second release follows.
 
 ## License
 
 MIT, see `LICENSE`. A release also carries third-party code, which
-`THIRD_PARTY_NOTICES` lists: meta's runtime is proprietary, and
-yyjson, libpq, OpenSSL, SQLite and libyaml are permissively licensed.
+`THIRD_PARTY_NOTICES` lists. meta and its runtime are proprietary for now
+and are meant to become open source; the SBOM says so in an annotation next
+to the license that applies today. yyjson, libpq, OpenSSL, SQLite and libyaml
+are permissively licensed.
 
 ## Status
 
