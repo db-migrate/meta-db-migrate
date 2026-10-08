@@ -90,6 +90,12 @@ size_t dbmWrite(char *into, size_t room, text_t text);
 enum { DBM_LOG_INFO = 1, DBM_LOG_WARN = 2, DBM_LOG_ERROR = 4, DBM_LOG_SQL = 8 };
 
 void dbmSetLogLevel(const char *levels);
+
+/**
+ * The first line of an -up.sql that only runs without --ignore-on-init, as
+ * `create --sql-file --ignore-on-init` writes it.
+ */
+#define DBM_IGNORE_ON_INIT_MARK "-- db-migrate: ignore-on-init"
 bool dbmLogs(int level);
 
 /** What `up` and `down` are handed. */
@@ -98,6 +104,13 @@ typedef struct {
 
   /** Nothing is sent; every statement is written to standard output. */
   bool dryRun;
+
+  /**
+   * Run with --ignore-on-init: the database already has what the migrations
+   * made, and they are only being recorded. A migration written for that
+   * returns from `up` early: `if (db->ignoreOnInit) return 0;`
+   */
+  bool ignoreOnInit;
 
   /** The first thing that went wrong, and the reason every later call is a no-op. */
   char error[512];

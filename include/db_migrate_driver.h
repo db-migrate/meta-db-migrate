@@ -57,6 +57,9 @@ struct driver_t {
   /** Every statement is printed as well as sent - `--verbose`. */
   bool verbose;
 
+  /** `--ignore-on-init`, handed to every migration as migrator_t's. */
+  bool ignoreOnInit;
+
   /**
    * Whether `removeColumn` may be given a recreation strategy for a NOT NULL
    * column - node's `_meta.supports.columnStrategies`.

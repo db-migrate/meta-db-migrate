@@ -71,6 +71,17 @@ static bool hasRun(json_t names, const char *name) {
   return false;
 }
 
+/**
+ * Whether an -up.sql was made with `create --sql-file --ignore-on-init`: its
+ * first line says so. node put the same decision in the .js loader it wrote
+ * beside the SQL; here the SQL is the whole migration, so it says it itself.
+ */
+static bool ignorableOnInit(const char *sql) {
+
+  sql += strspn(sql, " \t\r\n");
+  return strncmp(sql, DBM_IGNORE_ON_INIT_MARK, strlen(DBM_IGNORE_ON_INIT_MARK)) == 0;
+}
+
 /** Whether SQL text says nothing: whitespace, `--` lines and block comments only. */
 static bool onlyComments(const char *sql) {
 
@@ -182,7 +193,8 @@ static void giveLock(driver_t *driver) {
 static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
 
-  migrator_t db = {.driver = driver, .dryRun = driver->dryRun};
+  migrator_t db = {.driver = driver, .dryRun = driver->dryRun,
+                   .ignoreOnInit = driver->ignoreOnInit};
 
   /* compiled and opened now, if the launcher only knew its file */
   if (!dbmLoaded(migration))
@@ -214,9 +226,15 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
    * migration with no `down` worth having keeps. MySQL calls an empty
    * statement an error; nothing to do is not one.
    */
-  int answer = body != NULL       ? body(&db)
-               : onlyComments(sql) ? 0
-                                   : db.runSql(sql);
+  bool ignored = body == NULL && direction == UP && driver->ignoreOnInit &&
+                 ignorableOnInit(sql);
+
+  if (ignored)
+    dbmSay(stdout, TEXT`[INFO] ignoring on init: ${shown(migration->name)}\n`);
+
+  int answer = body != NULL                  ? body(&db)
+               : ignored || onlyComments(sql) ? 0
+                                              : db.runSql(sql);
 
   /**
    * A migration that answered 0 but has a failure recorded failed: the

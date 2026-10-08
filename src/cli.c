@@ -44,6 +44,7 @@ typedef struct {
   bool dryRun;
   bool sqlFile;
   bool v2File;
+  bool ignoreOnInit;
   const char *logLevel;
   const char *template;
   bool verbose;
@@ -97,6 +98,8 @@ options:
   --non-transactional         no transaction around a migration
   --sql-file                  create: an up and a down .sql file instead
   --v2-file                   create: a v2 migration, undone by what it learns
+  --ignore-on-init            create: an up that is skipped when run with it;
+                              up: record those without running them
   --log-level LEVELS          what is printed: info|warn|error|sql
   --template NAME             create: what the plugin of that name writes
   -i, --version               print the version
@@ -152,6 +155,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->sqlFile = true;
     else if (strcmp(word, "--v2-file") == 0)
       into->v2File = true;
+    else if (strcmp(word, "--ignore-on-init") == 0)
+      into->ignoreOnInit = true;
     else if (strcmp(word, "--log-level") == 0 && hasNext)
       into->logLevel = argv[++i];
     /* node reads it into a setting nothing looks at; taken, so scripts work */
@@ -365,9 +370,11 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
   return resolved(entry);
 }
 
-/** `migrations/20261008120000-add-pets.c`, with an up and a down to fill in. */
-/** One SQL file of a migration, with what node's template puts in it. */
-static bool writeSql(const char *path) {
+/**
+ * One SQL file of a migration, with what node's template puts in it - and
+ * for an up that --ignore-on-init skips, the line that says so first.
+ */
+static bool writeSql(const char *path, bool ignorable) {
 
   FILE *file = fopen(path, "wx");
 
@@ -375,6 +382,9 @@ static bool writeSql(const char *path) {
     perror(path);
     return false;
   }
+
+  if (ignorable)
+    dbmSay(file, TEXT`${DBM_IGNORE_ON_INIT_MARK}\n`);
 
   dbmSay(file, TEXT`/* Replace with your SQL commands */`);
   fclose(file);
@@ -388,7 +398,7 @@ static bool writeSql(const char *path) {
  * node needs a stub to read them, and here the migration *is* the two files.
  */
 static int createSqlFiles(const char *dir, const char *stamp,
-                          const char *name) {
+                          const char *name, bool ignorable) {
 
   char sqls[512];
   char path[640];
@@ -398,14 +408,15 @@ static int createSqlFiles(const char *dir, const char *stamp,
 
   dbmWrite(path, sizeof path, TEXT`${sqls}/${stamp}-${name}-up.sql`);
 
-  if (!writeSql(path))
+  if (!writeSql(path, ignorable))
     return 1;
 
   dbmWrite(path, sizeof path, TEXT`${sqls}/${stamp}-${name}-down.sql`);
 
-  return writeSql(path) ? 0 : 1;
+  return writeSql(path, false) ? 0 : 1;
 }
 
+/** `migrations/20261008120000-add-pets.c`, with an up and a down to fill in. */
 static int create(const options_t *options) {
 
   char stamp[32];
@@ -445,7 +456,7 @@ static int create(const options_t *options) {
   }
 
   if (options->sqlFile)
-    return createSqlFiles(dir, stamp, options->name);
+    return createSqlFiles(dir, stamp, options->name, options->ignoreOnInit);
 
   dbmWrite(path, sizeof path, TEXT`${dir}/${stamp}-${options->name}.c`);
 
@@ -464,6 +475,24 @@ static int migrate(schema_t *db) {
 }
 
 DBM_MIGRATION_V2(migrate)
+`);
+  else if (options->ignoreOnInit)
+    dbmSay(file, TEXT`#include <db_migrate.h>
+
+static int up(migrator_t *db) {
+
+  /* the database this is run on with --ignore-on-init has it already */
+  if (db->ignoreOnInit)
+    return 0;
+
+  return 0;
+}
+
+static int down(migrator_t *db) {
+  return 0;
+}
+
+DBM_MIGRATION(up, down)
 `);
   else
     dbmSay(file, TEXT`#include <db_migrate.h>
@@ -617,6 +646,7 @@ int dbmCli(int argc, char **argv) {
 
   driver->verbose = options.verbose;
   driver->noTransactions = options.noTransactions;
+  driver->ignoreOnInit = options.ignoreOnInit;
 
   /**
    * node's state - the lock, and what v2 migrations learned - through a
