@@ -28,7 +28,13 @@
  *
  * Where meta, its runtime headers, db-migrate's headers and the drivers are
  * is baked in when this is built, and can be moved with META_ROOT,
- * DBM_INCLUDE and DBM_DRIVERS.
+ * DBM_INCLUDE and DBM_DRIVERS. Where the baked-in place is gone - a release,
+ * unpacked somewhere else - they are looked for beside this program:
+ *
+ *   <prefix>/bin/meta-migrate
+ *   <prefix>/include/            db-migrate's headers
+ *   <prefix>/lib/                the drivers and plugins
+ *   <prefix>/lib/meta/           meta and its runtime/include
  */
 #include <db_migrate.h>
 
@@ -59,6 +65,71 @@ static const char *setting(const char *variable, const char *fallback) {
   const char *set = getenv(variable);
 
   return set != NULL && set[0] != '\0' ? set : fallback;
+}
+
+/** `<prefix>` of this program, from /proc/self/exe: the directory above bin/. */
+static const char *prefix(void) {
+
+  static char found[1024];
+  ssize_t length;
+
+  if (found[0] != '\0')
+    return found;
+
+  length = readlink("/proc/self/exe", found, sizeof found - 1);
+
+  if (length <= 0) {
+    found[0] = '\0';
+    return ".";
+  }
+
+  found[length] = '\0';
+
+  for (int up = 0; up < 2; ++up) {
+    char *slash = strrchr(found, '/');
+
+    if (slash == NULL)
+      return ".";
+
+    *slash = '\0';
+  }
+
+  return found;
+}
+
+/**
+ * A directory: the variable, else what was baked in if it is still there,
+ * else `<prefix>/<beside>`.
+ */
+static const char *place(const char *variable, const char *baked,
+                         const char *beside, char *into, size_t room) {
+
+  const char *set = getenv(variable);
+  struct stat seen;
+
+  if (set != NULL && set[0] != '\0')
+    return set;
+
+  if (stat(baked, &seen) == 0)
+    return baked;
+
+  dbmWrite(into, room, TEXT`${prefix()}/${beside}`);
+  return into;
+}
+
+static const char *metaRoot(void) {
+  static char found[1100];
+  return place("META_ROOT", DBM_META_ROOT, "lib/meta", found, sizeof found);
+}
+
+static const char *includeDirectory(void) {
+  static char found[1100];
+  return place("DBM_INCLUDE", DBM_INCLUDE_DIR, "include", found, sizeof found);
+}
+
+static const char *driverDirectory(void) {
+  static char found[1100];
+  return place("DBM_DRIVERS", DBM_DRIVER_DIR, "lib", found, sizeof found);
 }
 
 /** FNV-1a over the file, enough to tell an edited migration from the last one. */
@@ -177,8 +248,8 @@ static bool build(const char *source, const char *name, const char *under,
   char directory[1600];
   char log[2048];
   const char *base = strrchr(source, '/');
-  const char *root = setting("META_ROOT", DBM_META_ROOT);
-  const char *include = setting("DBM_INCLUDE", DBM_INCLUDE_DIR);
+  const char *root = metaRoot();
+  const char *include = includeDirectory();
   char meta[1024];
   char runtime[1024];
   char includeFlag[1100];
@@ -639,7 +710,7 @@ int main(int argc, char **argv) {
       command = word;
   }
 
-  dbmDriverDirectory = setting("DBM_DRIVERS", DBM_DRIVER_DIR);
+  dbmDriverDirectory = driverDirectory();
 
   if (!asking && !openPlugins())
     return 1;
