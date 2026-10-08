@@ -565,22 +565,38 @@ int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "embed-sql") == 0)
     return embedSql(argv[2], argv[3]);
 
-
   const char *dir = "migrations";
-  bool creating = false;
+  const char *command = NULL;
+  bool asking = false;
 
+  /**
+   * The command the way dbmCli reads it: the first word that is not an
+   * option or an option's value. Only the commands that run migrations need
+   * the directory - `--help`, `create`, `db:create` and no command at all
+   * must work where there is none yet.
+   */
   for (int i = 1; i < argc; ++i) {
 
-    if ((argv[i] in {"-m", "--migrations-dir"}) && i + 1 < argc)
-      dir = argv[i + 1];
+    const char *word = argv[i];
 
-    if (strcmp(argv[i], "create") == 0)
-      creating = true;
+    if ((word in {"-m", "--migrations-dir"}) && i + 1 < argc)
+      dir = argv[++i];
+    else if ((word in {"-e", "--env", "--config", "-c", "--count", "-t",
+                       "--table", "--migration-table"}) && i + 1 < argc)
+      ++i;
+    else if (word in {"-h", "--help", "-?", "-i", "--version"})
+      asking = true;
+    else if (word[0] != '-' && command == NULL)
+      command = word;
   }
 
   dbmDriverDirectory = setting("DBM_DRIVERS", DBM_DRIVER_DIR);
 
-  if (!creating && !listAll(dir))
+  bool needsMigrations =
+      !asking && command != NULL && strncmp(command, "create", 6) != 0 &&
+      strncmp(command, "db:", 3) != 0;
+
+  if (needsMigrations && !listAll(dir))
     return 1;
 
   return dbmCli(argc, argv);
