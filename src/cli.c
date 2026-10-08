@@ -64,6 +64,8 @@ commands:
   create name        a new migration in migrations/
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
+  db:create name     a database, if it is not there yet
+  db:drop name       a database, if it is there
 
 options:
   -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
@@ -366,6 +368,50 @@ DBM_MIGRATION(up, down)
   return 0;
 }
 
+/**
+ * `db:create shop` and `db:drop shop`, as node does them: connected with
+ * everything the configuration says except which database, since the one
+ * being made does not exist yet - and if it exists already, that is fine.
+ */
+static int database(const options_t *options, json_t config) {
+
+  char why[512] = "";
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *bare = yyjson_val_mut_copy(doc, config.node);
+
+  if (yyjson_mut_is_obj(bare))
+    yyjson_mut_obj_remove_key(bare, "database");
+
+  yyjson_mut_doc_set_root(doc, bare);
+
+  json_t without = meta_jsonFromMut(doc);
+  defer without.release();
+
+  driver_t *driver = dbmOpen(without, why, sizeof why);
+
+  if (driver == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    return 1;
+  }
+
+  bool creating = strcmp(options->scope, "create") == 0;
+
+  driver->dryRun = options->dryRun;
+  driver->verbose = options->verbose;
+
+  int answer = creating
+                   ? driver->createDatabase(driver, options->name, true)
+                   : driver->dropDatabase(driver, options->name, true);
+
+  if (answer != 0)
+    dbmSay(stderr, TEXT`[ERROR] could not ${creating ? "create" : "drop"} ${options->name}: ${driver->error}\n`);
+  else
+    dbmSay(stdout, TEXT`[INFO] ${creating ? "Created" : "Deleted"} database "${options->name}"\n`);
+
+  dbmClose(driver);
+  return answer == 0 ? 0 : 1;
+}
+
 int dbmCli(int argc, char **argv) {
 
   options_t options = {0};
@@ -405,8 +451,15 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
-  if (!(options.command in {"up", "down", "reset", "check", "sync"}))
+  if (!(options.command in {"up", "down", "reset", "check", "sync", "db"}))
     return usage();
+
+  if (strcmp(options.command, "db") == 0 &&
+      (options.name == NULL || options.scope == NULL ||
+       !(options.scope in {"create", "drop"}))) {
+    dbmSay(stderr, TEXT`db:create or db:drop, and a name: migrate db:create shop\n`);
+    return 2;
+  }
 
   if (strcmp(options.command, "sync") == 0 && options.name == NULL) {
     dbmSay(stderr, TEXT`sync needs a destination: migrate sync 20261008120000\n`);
@@ -420,6 +473,9 @@ int dbmCli(int argc, char **argv) {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
     return 1;
   }
+
+  if (strcmp(options.command, "db") == 0)
+    return database(&options, config);
 
   driver_t *driver = dbmOpen(config, why, sizeof why);
 
