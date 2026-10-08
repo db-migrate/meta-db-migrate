@@ -254,28 +254,29 @@ databases (`test/database.json`) are started by the commands at the top of
 
 ## CI and releases
 
-`.github/workflows/ci.yml` runs every suite on Ubuntu 24.04, each in its own
-job: `run.sh` once per database (started with `docker run`, as at the top of
-`test/run.sh`), plus `options.sh`, `plugins.sh` and `compat.sh`. The last
-one moves a project from node db-migrate to this and back, against
-node-db-migrate and its pg driver as published (`NODE_DB_MIGRATE_REF`,
-`NODE_PG_REF`, default `master`). meta is not on GitHub's
-runners. The workflow checks it out from the repository the variable
-`METALANGUAGE_REPOSITORY` names, at `METALANGUAGE_REF` (default
-`parser-rewrite`), with the secret `METALANGUAGE_TOKEN` if that repository is
-private, and builds it.
-
-A tag `v*` also builds a release with `tools/release.sh`: a tarball that
-unpacks to `/opt/meta-db-migrate` with the launcher, the libraries, drivers
-and plugins, the headers, and the meta that compiles migrations. meta bakes
-the location of its runtime headers into itself, so the release is built at
-the prefix it installs to and works from there. db-migrate's own parts are
-also found next to the launcher wherever it is.
+meta is not open source. The metalanguage repository publishes it, binary
+and headers, as the image `wxone/meta`, with everything under `/opt/meta`.
+This repository only uses it. meta bakes that path into itself, so it has to
+stay at `/opt/meta`:
 
 ```sh
-tar -xzf meta-db-migrate-v0.1.0-linux-x86_64.tar.gz -C /opt
-/opt/meta-db-migrate/bin/meta-migrate up
+docker create --name meta wxone/meta:latest
+sudo docker cp meta:/opt/meta /opt/meta && docker rm meta
+META_ROOT=/opt/meta ./build.sh
 ```
+
+`.github/workflows/ci.yml` does exactly this (`.github/actions/meta`;
+`META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
+24.04, each in its own job: `run.sh` once per database (started with
+`docker run`, as at the top of `test/run.sh`), plus `options.sh`,
+`plugins.sh` and `compat.sh`. The last one moves a project from node
+db-migrate to this and back, against node-db-migrate and its pg driver as
+published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
+
+A tag `v*` also builds a release with `tools/release.sh`: a tarball with the
+launcher, the libraries, drivers and plugins, and the headers, which unpacks
+to `/opt/meta-db-migrate`. meta itself is not in it. It comes from the image,
+as above.
 
 ## Status
 
