@@ -20,6 +20,11 @@
  *
  * Drivers are loaded the same way and only when the configuration names one,
  * so libpq is needed on a machine that talks to PostgreSQL and nowhere else.
+ * The shipped plugins too: libyaml only where there is a database.yml.
+ *
+ * A project's own plugins, in plugins/, are compiled the same way as its
+ * migrations and opened first, every time - they may be what reads the
+ * configuration.
  *
  * Where meta, its runtime headers, db-migrate's headers and the drivers are
  * is baked in when this is built, and can be moved with META_ROOT,
@@ -164,8 +169,8 @@ static void makeDirectories(char *path) {
   mkdir(path, 0755);
 }
 
-static bool build(const char *source, const char *name, const char *cache,
-                  char *object, size_t room) {
+static bool build(const char *source, const char *name, const char *under,
+                  const char *cache, char *object, size_t room) {
 
   char lowered[2048];
   char hashed[1024];
@@ -214,7 +219,7 @@ static bool build(const char *source, const char *name, const char *cache,
 
   dbmWrite(hashed, sizeof hashed, TEXT`${cache}/${zeroed(hex(hash), 16)}`);
   dbmWrite(directory, sizeof directory,
-           TEXT`${hashed}/migrations${scope[0] != '\0' ? "/" : ""}${scope}`);
+           TEXT`${hashed}/${under}${scope[0] != '\0' ? "/" : ""}${scope}`);
   dbmWrite(object, room, TEXT`${directory}/${stem}.so`);
 
   if (stat(object, &seen) == 0)
@@ -273,7 +278,8 @@ static bool compileAndOpen(const char *source, const char *name) {
 
   mkdir(".meta-migrate", 0755);
 
-  if (!build(source, name, ".meta-migrate", object, sizeof object))
+  if (!build(source, name, "migrations", ".meta-migrate", object,
+             sizeof object))
     return false;
 
   /**
@@ -560,6 +566,47 @@ static int embedSql(const char *dir, const char *into) {
   return ok ? 0 : 1;
 }
 
+/**
+ * The project's plugins, compiled if they changed and opened - before
+ * anything else, because one may be what reads the configuration. Opened
+ * now, not lazily: what a plugin does is register, from its constructor.
+ */
+static bool openPlugins(void) {
+
+  DIR *listing = opendir("plugins");
+  struct dirent *entry;
+  bool ok = true;
+
+  if (listing == NULL)
+    return true;
+
+  mkdir(".meta-migrate", 0755);
+
+  while (ok && (entry = readdir(listing)) != NULL) {
+
+    size_t length = strlen(entry->d_name);
+    char source[1024];
+    char name[600];
+    char object[2400];
+
+    if (length < 3 || strcmp(entry->d_name + length - 2, ".c") != 0)
+      continue;
+
+    dbmWrite(source, sizeof source, TEXT`plugins/${entry->d_name}`);
+    dbmWrite(name, sizeof name, TEXT`/${entry->d_name}`);
+
+    ok = build(source, name, "plugins", ".meta-migrate", object, sizeof object);
+
+    if (ok && dlopen(object, RTLD_NOW | RTLD_GLOBAL) == NULL) {
+      dbmSay(stderr, TEXT`[ERROR] cannot open ${object}: ${dlerror()}\n`);
+      ok = false;
+    }
+  }
+
+  closedir(listing);
+  return ok;
+}
+
 int main(int argc, char **argv) {
 
   if (argc == 4 && strcmp(argv[1], "embed-sql") == 0)
@@ -593,6 +640,9 @@ int main(int argc, char **argv) {
   }
 
   dbmDriverDirectory = setting("DBM_DRIVERS", DBM_DRIVER_DIR);
+
+  if (!asking && !openPlugins())
+    return 1;
 
   bool needsMigrations =
       !asking && command != NULL && strncmp(command, "create", 6) != 0 &&

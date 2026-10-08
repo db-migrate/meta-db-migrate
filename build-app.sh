@@ -9,7 +9,8 @@
 # The drivers are the ones the program talks to - pg when none are named -
 # and only those are linked, with only the system libraries they need: a
 # program on SQLite does not need libpq installed to start. The shipped
-# plugins are named the same way (`pg yaml`).
+# plugins are named the same way (`pg yaml`), and the app's own, in its
+# plugins/ directory, are always compiled in.
 #
 # They go in whole. Drivers, plugins and migrations register themselves from
 # constructors, and nothing else names them - so a linker left to pick only
@@ -62,6 +63,11 @@ build() {
 for source in "$app"/*.c; do
   [ -f "$source" ] || continue
   build "$source" "$work/app/$(basename "$source")"
+done
+
+for source in "$app"/plugins/*.c; do
+  [ -f "$source" ] || continue
+  build "$source" "$work/plugins/$(basename "$source")"
 done
 
 # a migration is lowered under migrations/[scope/]<its own name>, because the
