@@ -82,6 +82,16 @@ void dbmSay(FILE *to, text_t line);
 /** A template into a fixed buffer; answers the length it wanted, as snprintf. */
 size_t dbmWrite(char *into, size_t room, text_t text);
 
+/**
+ * node's --log-level: which of `[INFO]`, `[WARN]`, `[ERROR]` and the
+ * statements (`sql`) dbmSay lets through - `"sql|warn"`. Lines without one
+ * of those marks (usage, the version) always go out.
+ */
+enum { DBM_LOG_INFO = 1, DBM_LOG_WARN = 2, DBM_LOG_ERROR = 4, DBM_LOG_SQL = 8 };
+
+void dbmSetLogLevel(const char *levels);
+bool dbmLogs(int level);
+
 /** What `up` and `down` are handed. */
 typedef struct {
   driver_t *driver;

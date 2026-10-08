@@ -91,12 +91,59 @@ size_t dbmWrite(char *into, size_t room, text_t text) {
   return text.into(into, room);
 }
 
+static int logLevel = DBM_LOG_INFO | DBM_LOG_WARN | DBM_LOG_ERROR | DBM_LOG_SQL;
+
+void dbmSetLogLevel(const char *levels) {
+
+  const char *at = levels;
+
+  logLevel = 0;
+
+  while (*at != '\0') {
+
+    size_t length = strcspn(at, "|");
+
+    if (length == 4 && strncmp(at, "info", 4) == 0)
+      logLevel |= DBM_LOG_INFO;
+    else if (length == 4 && strncmp(at, "warn", 4) == 0)
+      logLevel |= DBM_LOG_WARN;
+    else if (length == 5 && strncmp(at, "error", 5) == 0)
+      logLevel |= DBM_LOG_ERROR;
+    else if (length == 3 && strncmp(at, "sql", 3) == 0)
+      logLevel |= DBM_LOG_SQL;
+
+    at += length + (at[length] == '|');
+  }
+}
+
+bool dbmLogs(int level) {
+  return (logLevel & level) != 0;
+}
+
+/** The level a line is at, by its mark; 0 for one that always goes out. */
+static int levelOf(const char *text) {
+
+  if (strncmp(text, "[INFO]", 6) == 0)
+    return DBM_LOG_INFO;
+
+  if (strncmp(text, "[WARN]", 6) == 0)
+    return DBM_LOG_WARN;
+
+  if (strncmp(text, "[ERROR]", 7) == 0)
+    return DBM_LOG_ERROR;
+
+  if (strncmp(text, "[SQL]", 5) == 0)
+    return DBM_LOG_SQL;
+
+  return 0;
+}
+
 void dbmSay(FILE *to, text_t line) {
 
   char *text = line.owned();
 
   /* flushed: piped into a CI log, an error stays after the line it is about */
-  if (text != NULL) {
+  if (text != NULL && (levelOf(text) == 0 || dbmLogs(levelOf(text)))) {
     fputs(text, to);
     fflush(to);
   }
@@ -168,8 +215,10 @@ int dbmSend(driver_t *self, dbm_text_t *sql) {
   if (sql->failed)
     return dbmFail(self, TEXT`out of memory writing a statement`);
 
+  /* a dry run's statements are its output, and node let --log-level hide them */
   if (self->dryRun) {
-    dbmSay(stdout, TEXT`${sql->text}${terminated(sql->text) ? "" : ";"}\n`);
+    if (dbmLogs(DBM_LOG_SQL))
+      dbmSay(stdout, TEXT`${sql->text}${terminated(sql->text) ? "" : ";"}\n`);
     return 0;
   }
 
@@ -182,7 +231,8 @@ int dbmSend(driver_t *self, dbm_text_t *sql) {
 int dbmQuery(driver_t *self, const sql_t *query, json_t *rows) {
 
   if (self->dryRun) {
-    dbmSay(stdout, TEXT`${query->text}; -- ${query->count} parameter(s)\n`);
+    if (dbmLogs(DBM_LOG_SQL))
+      dbmSay(stdout, TEXT`${query->text}; -- ${query->count} parameter(s)\n`);
     return 0;
   }
 

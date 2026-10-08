@@ -44,6 +44,7 @@ typedef struct {
   bool dryRun;
   bool sqlFile;
   bool v2File;
+  const char *logLevel;
   const char *template;
   bool verbose;
   bool noTransactions;
@@ -96,6 +97,7 @@ options:
   --non-transactional         no transaction around a migration
   --sql-file                  create: an up and a down .sql file instead
   --v2-file                   create: a v2 migration, undone by what it learns
+  --log-level LEVELS          what is printed: info|warn|error|sql
   --template NAME             create: what the plugin of that name writes
   -i, --version               print the version
   -h, --help                  this
@@ -150,6 +152,11 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->sqlFile = true;
     else if (strcmp(word, "--v2-file") == 0)
       into->v2File = true;
+    else if (strcmp(word, "--log-level") == 0 && hasNext)
+      into->logLevel = argv[++i];
+    /* node reads it into a setting nothing looks at; taken, so scripts work */
+    else if (strcmp(word, "--ignore-completed-migrations") == 0)
+      ;
     else if (strcmp(word, "--template") == 0 && hasNext)
       into->template = argv[++i];
     else if (word[0] == '-') {
@@ -531,6 +538,9 @@ int dbmCli(int argc, char **argv) {
 
   if (options.help)
     return help();
+
+  if (options.logLevel != NULL)
+    dbmSetLogLevel(options.logLevel);
 
   /* `up:billing` is the command `up` in the scope `billing` */
   char command[32] = "";
