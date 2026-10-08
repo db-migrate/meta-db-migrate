@@ -1,3 +1,19 @@
+## 0.2.0 (2026-10-09)
+
+### Features
+
+* **api:** `dbmMigrateUp`, migrating from inside a program: the connection,
+  node's state on a second one, the lock with its heartbeat, up, and
+  everything closed again - what `up` does, without a command line
+* **api:** `dbmSetLogger`, the lines that went to stdout and stderr into the
+  program's own log; `dbmLastError`, the last error said
+* **build:** `libdbmigrate-core.a`, the core without meta's runtime, for a
+  program that links `libmeta_runtime.a` itself - an nginx module
+* **sbom:** in the shape of wx1-keyagent's, so one nests in the other:
+  `pkg:generic` purls with their download URL, scopes, glibc as excluded
+  with the version the release asks for, the shipped files by their hashes,
+  the git commit
+
 ## 0.1.0 (2026-10-08)
 
 ### Features
