@@ -49,6 +49,11 @@ typedef struct {
 
   /** `up:billing` - the directory under migrations/ the command works in. */
   const char *scope;
+
+  /** node's state table, and how long a lock may go untouched before it is taken. */
+  const char *stateTable;
+  long lockTimeout;
+  long lockInterval;
 } options_t;
 
 static int help(void) {
@@ -73,6 +78,9 @@ options:
   -m, --migrations-dir DIR    where migrations are (migrations)
   -c, --count N               at most N migrations
   -t, --table NAME            the table the history is kept in (migrations)
+  -s, --state-table NAME      node's state and lock table (migrations_state)
+  --lock-timeout MS           a lock untouched this long is taken over (60000)
+  --lock-interval MS          how often a waiting process looks (1000)
   --dry-run                   print the statements instead of sending them
   --check                     with up or sync: list what would run
   -v, --verbose               print every statement as it is sent
@@ -104,6 +112,12 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->dir = argv[++i];
     else if (word in {"-t", "--table", "--migration-table"} && hasNext)
       into->table = argv[++i];
+    else if (word in {"-s", "--state", "--state-table"} && hasNext)
+      into->stateTable = argv[++i];
+    else if (strcmp(word, "--lock-timeout") == 0 && hasNext)
+      into->lockTimeout = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--lock-interval") == 0 && hasNext)
+      into->lockInterval = strtol(argv[++i], NULL, 10);
     else if (word in {"-v", "--verbose"})
       into->verbose = true;
     else if (strcmp(word, "--non-transactional") == 0)
@@ -492,6 +506,33 @@ int dbmCli(int argc, char **argv) {
   driver->verbose = options.verbose;
   driver->noTransactions = options.noTransactions;
 
+  /**
+   * node's state - the lock, and what v2 migrations learned - through a
+   * connection of its own, so it outlives a migration's transaction being
+   * rolled back on the other one.
+   */
+  driver_t *stateDriver = dbmOpen(config, why, sizeof why);
+
+  if (stateDriver == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    dbmClose(driver);
+    return 1;
+  }
+
+  stateDriver->verbose = options.verbose;
+  driver->state = dbmStateOpen(
+      stateDriver, options.stateTable != NULL ? options.stateTable
+                                              : "migrations_state",
+      options.lockTimeout, options.lockInterval,
+      options.dryRun || strcmp(options.command, "check") == 0);
+
+  if (driver->state == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] could not open the state table: ${stateDriver->error}\n`);
+    dbmClose(stateDriver);
+    dbmClose(driver);
+    return 1;
+  }
+
   /* `up --check` is node's way of asking `check` */
   if (options.checkOnly && options.command in {"up", "sync"})
     options.command = "check";
@@ -515,6 +556,8 @@ int dbmCli(int argc, char **argv) {
   else
     answer = dbmCheck(driver);
 
+  dbmStateClose(driver->state);
+  dbmClose(stateDriver);
   dbmClose(driver);
   return answer == 0 ? 0 : 1;
 }

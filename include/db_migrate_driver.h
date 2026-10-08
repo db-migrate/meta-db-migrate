@@ -58,6 +58,12 @@ struct driver_t {
   bool verbose;
 
   /**
+   * The connection node's state is kept through, and the table it is kept
+   * in. Set by the command line; v2 migrations and the lock need it.
+   */
+  struct dbm_state_t *state;
+
+  /**
    * No transaction around a migration - `--non-transactional`, for what a
    * database refuses to do inside one, like PostgreSQL's CREATE INDEX
    * CONCURRENTLY. The record is still written after the migration.
@@ -240,6 +246,90 @@ int dbmBaseDeleteMigrationRecord(driver_t *self, const char *name);
  * "string"` and `name: {type: "string"}` are the same column.
  */
 const char *dbmColumnType(json_t spec);
+
+/* --------------------------------------------- node's state table */
+
+/**
+ * The key-value table node keeps its state in - key, value, run_on - read
+ * and written the way node does it. `dbmKvGet` hands back a copy of the
+ * value, or NULL when there is no such row; `dbmKvSwap` updates only when
+ * the row still holds `expected`.
+ */
+int dbmKvCreate(driver_t *self, const char *table);
+int dbmKvGet(driver_t *self, const char *table, const char *key, char **value);
+int dbmKvInsert(driver_t *self, const char *table, const char *key,
+                const char *value);
+int dbmKvUpdate(driver_t *self, const char *table, const char *key,
+                const char *value);
+int dbmKvSwap(driver_t *self, const char *table, const char *key,
+              const char *value, const char *expected);
+int dbmKvDelete(driver_t *self, const char *table, const char *key);
+
+/* ---------------------------------------------------- node's state */
+
+#include <pthread.h>
+
+/**
+ * What node db-migrate keeps in its state table, and the lock on it.
+ *
+ *   __dbmigrate_state__    {"s":{"step","fin","ID","date","n"}} - who holds
+ *                          the lock, and how far the running migration got
+ *   __dbmigrate_schema__   {"i","c","f","e"} - the schema v2 migrations built
+ *   <migration name>       {"i","c","f","s"} - what one v2 migration changed,
+ *                          and the steps that undo it
+ *
+ * Written through a connection of its own, so that what it says survives
+ * the rollback of a migration's transaction.
+ */
+typedef struct dbm_state_t {
+  driver_t *db;
+  const char *table;
+  long timeoutMs;
+  long intervalMs;
+
+  /** A session of the lock is running, and whether this process holds it. */
+  bool active;
+  bool owner;
+
+  /** The lock row as last written and read back: the next swap's `expected`. */
+  char *current;
+  char id[64];
+
+  /** The schema the v2 migrations built: `{i, c, f, e}`, as JSON. */
+  void *schema;
+
+  /** Writes from the heartbeat and from the walker, one at a time. */
+  pthread_mutex_t writing;
+  pthread_cond_t wake;
+  pthread_t heartbeat;
+  bool beating;
+  bool stopping;
+} dbm_state_t;
+
+/** The state table made if it is not there, and the schema read from it. */
+dbm_state_t *dbmStateOpen(driver_t *db, const char *table, long timeoutMs,
+                          long intervalMs, bool dry);
+void dbmStateClose(dbm_state_t *self);
+
+/**
+ * The migration lock, waited for while another process holds it, and taken
+ * over when its holder has not touched it for the timeout. False when it
+ * could not be had at all, with the reason said.
+ */
+bool dbmStateLock(dbm_state_t *self);
+void dbmStateUnlock(dbm_state_t *self);
+int dbmStateReloadSchema(dbm_state_t *self);
+
+/** How far the running migration got: -1 leaves a field as it is. */
+int dbmStateProgress(dbm_state_t *self, int step, int fin);
+
+/** One v2 migration's own record - `{i, c, f, s}` - as a JSON text the caller frees. */
+char *dbmStateBegin(dbm_state_t *self, const char *key);
+int dbmStateSave(dbm_state_t *self, const char *key, const char *migration);
+int dbmStateForget(dbm_state_t *self, const char *key);
+
+int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
+              char *why, size_t room);
 
 /** Runs or, on a dry run, prints. The way every generic version sends SQL. */
 int dbmSend(driver_t *self, dbm_text_t *sql);

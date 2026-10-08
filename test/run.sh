@@ -237,7 +237,7 @@ for driver in $drivers; do
   "$app" down -e "$driver" -c $((total - 1)) >/dev/null 2>&1
   expect "down -c undoes all but the first" 1 \
     "$(sql 'select count(*) from migrations')"
-  expect "pets is gone" "migrations,owners" "$(tables)"
+  expect "pets is gone" "migrations,migrations_state,owners" "$(tables)"
 
   "$app" up -e "$driver" >/dev/null 2>&1
   expect "up again" "$total" "$(sql 'select count(*) from migrations')"
@@ -260,7 +260,7 @@ for driver in $drivers; do
 
   "$app" reset -e "$driver" >/dev/null 2>&1
   expect "reset undoes everything" 0 "$(sql 'select count(*) from migrations')"
-  expect "and leaves only its own table" "migrations" "$(tables)"
+  expect "and leaves only its own tables" "migrations,migrations_state" "$(tables)"
 
   # the history in a table of another name, beside the usual one
   "$app" up -e "$driver" -t history -c 1 >/dev/null 2>&1

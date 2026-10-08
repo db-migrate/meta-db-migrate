@@ -99,6 +99,40 @@ static bool onlyComments(const char *sql) {
   return true;
 }
 
+/**
+ * The migration lock, when there is something to do - and the record of what
+ * has run read again under it, because another process may have done the
+ * work while this one waited. Nothing on a dry run, as node has it.
+ */
+static bool takeLock(driver_t *driver, json_t *names) {
+
+  if (driver->state == NULL || driver->dryRun)
+    return true;
+
+  if (!dbmStateLock(driver->state))
+    return false;
+
+  if (dbmStateReloadSchema(driver->state)) {
+    dbmSay(stderr, TEXT`[ERROR] could not read the schema state: ${driver->state->db->error}\n`);
+    return false;
+  }
+
+  json_t again, bool ok = loaded(driver);
+
+  if (!ok)
+    return false;
+
+  names->release();
+  *names = again;
+  return true;
+}
+
+static void giveLock(driver_t *driver) {
+
+  if (driver->state != NULL)
+    dbmStateUnlock(driver->state);
+}
+
 /** One migration, one direction, one transaction. */
 static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
@@ -202,7 +236,22 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
   if (!ready)
     return -1;
 
+  bool pending = false;
+
+  for (size_t i = 0; i < total && !pending; ++i)
+    pending = inScope(migrations[i].name) &&
+              !hasRun(names, migrations[i].name) &&
+              (destination == NULL ||
+               towards(migrations[i].name, destination) <= 0);
+
+  if (pending && !takeLock(driver, &names)) {
+    names.release();
+    giveLock(driver);
+    return -1;
+  }
+
   defer names.release();
+  defer giveLock(driver);
 
   for (size_t i = 0; i < total && (count == 0 || done < count); ++i) {
 
@@ -255,7 +304,20 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   if (!ready)
     return -1;
 
+  bool pending = false;
+
+  for (int i = names.count() - 1; i >= 0 && !pending; --i)
+    pending = inScope(names[i].name) &&
+              (destination == NULL || towards(names[i].name, destination) > 0);
+
+  if (pending && !takeLock(driver, &names)) {
+    names.release();
+    giveLock(driver);
+    return -1;
+  }
+
   defer names.release();
+  defer giveLock(driver);
 
   for (int i = names.count() - 1; i >= 0 && (count == 0 || done < count);
        --i) {
