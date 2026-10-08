@@ -172,6 +172,33 @@ Configuration works as in node db-migrate:
 - `DATABASE_URL` when there is no file
 - `tunnel: {...}` in a connection, to reach it through ssh (see Plugins)
 
+## From inside a program that migrates itself
+
+A program that brings meta's runtime itself - an nginx module built with
+`meta -module`, which links `lib/libmeta_runtime.a` - links
+`libdbmigrate-core.a`, the core without that runtime, and its drivers, and
+migrates when it starts:
+
+```c
+static void toLog(int level, const char *line) { /* the program's log */ }
+
+dbmSetLogger(toLog);                 /* instead of stdout and stderr */
+
+char why[512];
+if (dbmMigrateUp(config, NULL, why, sizeof why) != 0)   /* NULL: node's defaults */
+  fail(why);
+```
+
+`dbmMigrateUp` does what `up` does: a connection, a second one for node's
+state, the lock with its heartbeat, every migration the database has not
+run (v2 included), and everything closed again. It blocks. `config` is one
+connection as an environment of database.json says it; a `dbm_options_t`
+names other tables or lock timings. `test/embed.sh` builds such a shared
+object, loads it and migrates through it.
+
+Everything in libdbmigrate is built with `-fPIC`, so all of it can go into
+a shared object.
+
 ## During development
 
 ```sh
@@ -262,6 +289,7 @@ test/run.sh                   # against all four databases
 test/plugins.sh               # yaml, plugins/, the ssh tunnel (own sshd)
 test/options.sh               # --ignore-on-init, --log-level, dry runs
 test/static.sh                # build-app --static: glibc only, on bare Debian/Fedora
+test/embed.sh                 # dbmMigrateUp from a shared object with its own runtime
 test/compat.sh                # moving a project from node db-migrate and back
 ```
 
@@ -288,7 +316,7 @@ META_ROOT=/opt/meta ./build.sh
 `META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
-`plugins.sh`, `static.sh` and `compat.sh`. The last one moves a project from node
+`plugins.sh`, `static.sh`, `embed.sh` and `compat.sh`. The last one moves a project from node
 db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
 
