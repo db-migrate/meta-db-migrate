@@ -582,7 +582,9 @@ int main(int argc, char **argv) {
     if ((word in {"-m", "--migrations-dir"}) && i + 1 < argc)
       dir = argv[++i];
     else if ((word in {"-e", "--env", "--config", "-c", "--count", "-t",
-                       "--table", "--migration-table"}) && i + 1 < argc)
+                       "--table", "--migration-table", "-s", "--state",
+                       "--state-table", "--lock-timeout", "--lock-interval"}) &&
+             i + 1 < argc)
       ++i;
     else if (word in {"-h", "--help", "-?", "-i", "--version"})
       asking = true;
