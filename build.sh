@@ -3,12 +3,13 @@
 # Builds everything under build/:
 #
 #   libdbmigrate.a          the core and the runtime
-#   libdbmigrate-<d>.a      one driver, for a program that links it
-#   libdbmigrate-<d>.so     the same driver, for the launcher to load
+#   libdbmigrate-<d>.a      one driver or plugin, for a program that links it
+#   libdbmigrate-<d>.so     the same, for the launcher to load
 #   meta-migrate            the development launcher
 #
 # The drivers are whatever is in src/drivers/: pg, cockroachdb (which is pg
-# and its own differences), mysql, sqlite3.
+# and its own differences), mysql, sqlite3. The plugins are in src/plugins/:
+# yaml. Both are built the same way, because both are linked the same way.
 #
 # Every source is meta, so each one is lowered to C first and the C compiler
 # only ever sees the lowered files. The runtime is the two objects meta's own
@@ -63,7 +64,7 @@ for source in "$here"/src/*.c; do
 done
 
 drivers=""
-for source in "$here"/src/drivers/*.c; do
+for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
   [ -f "$source" ] || continue
   name=$(basename "$source" .c)
   lower "$source" "$out/lowered/driver-$name.c"
@@ -94,6 +95,7 @@ librariesOf() {
     pg|cockroachdb) echo "-lpq" ;;
     mysql) echo "-lmysqlclient" ;;
     sqlite3) echo "-lsqlite3" ;;
+    yaml) echo "-lyaml -lm" ;;
   esac
 }
 
@@ -128,4 +130,4 @@ if [ -f "$here/tools/meta-migrate.c" ]; then
 
 fi
 
-echo "built $out: libdbmigrate.a, drivers:" $names
+echo "built $out: libdbmigrate.a, drivers and plugins:" $names

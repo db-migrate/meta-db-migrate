@@ -4,13 +4,14 @@
 # and every file under its migrations/ is lowered and linked against the
 # library. The result is the one binary that gets deployed.
 #
-#   ./build-app.sh <app dir> <output> [driver...]
+#   ./build-app.sh <app dir> <output> [driver or plugin...]
 #
 # The drivers are the ones the program talks to - pg when none are named -
 # and only those are linked, with only the system libraries they need: a
-# program on SQLite does not need libpq installed to start.
+# program on SQLite does not need libpq installed to start. The shipped
+# plugins are named the same way (`pg yaml`).
 #
-# They go in whole. Drivers and migrations register themselves from
+# They go in whole. Drivers, plugins and migrations register themselves from
 # constructors, and nothing else names them - so a linker left to pick only
 # what is referenced would leave every one of them out.
 set -eu
@@ -83,7 +84,7 @@ libraries=""
 
 for driver in $drivers; do
   if ! grep -q "^$driver " "$here/build/drivers.txt"; then
-    echo "there is no $driver driver" >&2
+    echo "there is no $driver driver or plugin" >&2
     exit 1
   fi
 
