@@ -149,13 +149,24 @@ static int missingChangeColumn(driver_t *self, const char *table,
  * Runs, or on a dry run says what it would have run. Every generic version
  * sends through here, so a dry run is one line rather than one per statement.
  */
+/** Whether SQL ends in its own `;` - an .sql file's text usually does. */
+static bool terminated(const char *sql) {
+
+  size_t length = strlen(sql);
+
+  while (length > 0 && strchr(" \t\r\n", sql[length - 1]) != NULL)
+    --length;
+
+  return length > 0 && sql[length - 1] == ';';
+}
+
 int dbmSend(driver_t *self, dbm_text_t *sql) {
 
   if (sql->failed)
     return dbmFail(self, TEXT`out of memory writing a statement`);
 
   if (self->dryRun) {
-    dbmSay(stdout, TEXT`${sql->text};\n`);
+    dbmSay(stdout, TEXT`${sql->text}${terminated(sql->text) ? "" : ";"}\n`);
     return 0;
   }
 
@@ -1020,12 +1031,20 @@ int dbmBaseLoadedMigrations(driver_t *self, json_t *names) {
   sql_t query = SQL`SELECT name FROM ${&table} ORDER BY run_on ASC, id ASC`;
   defer query.release();
 
-  if (self->dryRun) {
+  /**
+   * Read in a dry run too - what would run depends on what has - unless the
+   * table is not there yet: then the dry run printed its CREATE instead of
+   * sending it, and nothing has run.
+   */
+  int answer = self->query(self, &query, names);
+
+  if (answer != 0 && self->dryRun) {
+    self->error[0] = '\0';
     *names = meta_toJSON("[]");
     return 0;
   }
 
-  return self->query(self, &query, names);
+  return answer;
 }
 
 int dbmBaseAddMigrationRecord(driver_t *self, const char *name) {
