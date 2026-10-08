@@ -36,7 +36,10 @@ if [ ! -x "$meta/meta" ]; then
   exit 1
 fi
 
-rm -rf "$prefix"
+# emptied, not removed: under /opt it is made by root and handed over, and
+# whoever releases may not make it again
+mkdir -p "$prefix"
+find "$prefix" -mindepth 1 -delete
 mkdir -p "$prefix/bin" "$prefix/include" "$prefix/lib"
 
 # built apart from build/, which stays the development build
