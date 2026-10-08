@@ -1,3 +1,27 @@
+## 0.1.0 (2026-10-08)
+
+### Features
+
+* **release:** meta comes with it, at `/opt/meta` - the compiler, its runtime
+  headers and `libmeta_runtime.a` - so the launcher and `build-app.sh` need
+  nothing beside the release but a C compiler
+* **release:** the launcher's drivers and plugins carry libpq, OpenSSL,
+  SQLite and libyaml inside them (`build.sh` with `DBM_STATIC_DEPS`), so it
+  runs on a host that has none of them; mysql still needs libmysqlclient
+* **deps:** SQLite 3.53.4 built from its amalgamation, position independent
+* **sbom:** meta as a component of its own; meta and its runtime carry an
+  annotation that they are meant to become open source, next to the
+  proprietary license that applies today
+
+### Bug Fixes
+
+* **plugins:** a shipped plugin that is there but cannot be loaded says why,
+  instead of claiming nothing reads the configuration file
+
+### CI
+
+* `actions/checkout` and `actions/setup-node` v7, on Node 24
+
 ## 0.0.1 (2026-10-08)
 
 The first release: db-migrate rewritten in meta. Programs ship with their
