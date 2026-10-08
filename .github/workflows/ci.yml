@@ -1,12 +1,13 @@
 # The tests against every database, and a release on a tag.
 #
-# meta is not on GitHub's own runners: it is checked out from the repository
-# the variable METALANGUAGE_REPOSITORY names (owner/name), at
-# METALANGUAGE_REF, with the token in the secret METALANGUAGE_TOKEN when that
-# repository is private - and built here.
+# meta is not open source. The metalanguage repository publishes it, binary
+# and headers, as the image wxone/meta, and this only uses it: copied out to
+# /opt/meta - see .github/actions/meta. META_IMAGE picks another tag than
+# wxone/meta:latest.
 #
 # compat moves a project between node db-migrate and this, both ways, against
-# node-db-migrate and its pg driver as published (NODE_DB_MIGRATE_REF).
+# node-db-migrate and its pg driver as published (NODE_DB_MIGRATE_REF,
+# NODE_PG_REF).
 name: ci
 
 on:
@@ -15,9 +16,6 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
-
-env:
-  META_ROOT: ${{ github.workspace }}/metalanguage
 
 jobs:
   test:
@@ -29,20 +27,15 @@ jobs:
         suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, compat]
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: meta-db-migrate
 
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/meta
         with:
-          repository: ${{ vars.METALANGUAGE_REPOSITORY }}
-          ref: ${{ vars.METALANGUAGE_REF || 'parser-rewrite' }}
-          token: ${{ secrets.METALANGUAGE_TOKEN || github.token }}
-          path: metalanguage
+          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
 
       - name: system packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends cmake libpq-dev \
+          sudo apt-get install -yq --no-install-recommends libpq-dev \
             libmysqlclient-dev libsqlite3-dev libyaml-dev sqlite3 \
             postgresql-client mysql-client openssh-server
 
@@ -56,24 +49,20 @@ jobs:
         with:
           repository: db-migrate/node-db-migrate
           ref: ${{ vars.NODE_DB_MIGRATE_REF || 'master' }}
-          path: node-db-migrate
+          path: build/node-db-migrate
 
       - if: matrix.suite == 'compat'
         uses: actions/checkout@v4
         with:
           repository: db-migrate/pg
           ref: ${{ vars.NODE_PG_REF || 'master' }}
-          path: pg
+          path: build/pg
 
       - if: matrix.suite == 'compat'
         name: node dependencies
         run: |
-          (cd node-db-migrate && npm install --omit=dev --no-audit --no-fund)
-          (cd pg && npm install --omit=dev --no-audit --no-fund)
-
-      - name: meta
-        working-directory: metalanguage
-        run: cmake . >/dev/null && make -j"$(nproc)" meta
+          (cd build/node-db-migrate && npm install --omit=dev --no-audit --no-fund)
+          (cd build/pg && npm install --omit=dev --no-audit --no-fund)
 
       - name: databases
         run: |
@@ -102,14 +91,12 @@ jobs:
           sudo mkdir -p /run/sshd
 
       - name: build
-        working-directory: meta-db-migrate
         run: ./build.sh
 
       - name: test
-        working-directory: meta-db-migrate
         run: |
-          export NODE_DB_MIGRATE="$GITHUB_WORKSPACE/node-db-migrate"
-          export NODE_PG="$GITHUB_WORKSPACE/pg"
+          export NODE_DB_MIGRATE="$GITHUB_WORKSPACE/build/node-db-migrate"
+          export NODE_PG="$GITHUB_WORKSPACE/build/pg"
           case ${{ matrix.suite }} in
             options|plugins|compat) test/${{ matrix.suite }}.sh ;;
             *) test/run.sh ${{ matrix.suite }} ;;
@@ -123,36 +110,28 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: meta-db-migrate
 
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/meta
         with:
-          repository: ${{ vars.METALANGUAGE_REPOSITORY }}
-          ref: ${{ vars.METALANGUAGE_REF || 'parser-rewrite' }}
-          token: ${{ secrets.METALANGUAGE_TOKEN || github.token }}
-          path: metalanguage
+          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
 
       - name: system packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq --no-install-recommends cmake libpq-dev \
+          sudo apt-get install -yq --no-install-recommends libpq-dev \
             libmysqlclient-dev libsqlite3-dev libyaml-dev
 
-      # meta bakes its paths in, so the release is built where it installs
       - name: release
-        working-directory: meta-db-migrate
         run: |
           sudo mkdir -p /opt/meta-db-migrate
           sudo chown "$(id -u):$(id -g)" /opt/meta-db-migrate
-          tools/release.sh "$META_ROOT" /opt/meta-db-migrate \
+          tools/release.sh /opt/meta /opt/meta-db-migrate \
             "dist/meta-db-migrate-${GITHUB_REF_NAME}-linux-x86_64.tar.gz"
 
       - name: publish
-        working-directory: meta-db-migrate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz \
             --title "$GITHUB_REF_NAME" --notes \
-            "Unpacks to /opt/meta-db-migrate: tar -xzf <file> -C /opt"
+            "Unpacks to /opt/meta-db-migrate: tar -xzf <file> -C /. meta itself comes from the image wxone/meta (its /opt/meta)."

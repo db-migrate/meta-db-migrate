@@ -1,0 +1,26 @@
+# meta, as the metalanguage repository publishes it: the image wxone/meta,
+# with the binary and its headers at /opt/meta, where it was built and where
+# its baked-in paths point. Copied out to the same place, and META_ROOT set
+# for build.sh.
+name: meta
+description: meta from wxone/meta, at /opt/meta
+inputs:
+  image:
+    description: the image and tag
+    required: false
+    default: wxone/meta:latest
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -eu
+        docker pull -q "$IMAGE"
+        container=$(docker create "$IMAGE")
+        sudo docker cp "$container:/opt/meta" /opt/meta
+        docker rm "$container" >/dev/null
+        sudo chown -R "$(id -u):$(id -g)" /opt/meta
+        test -x /opt/meta/meta
+        echo "META_ROOT=/opt/meta" >>"$GITHUB_ENV"
