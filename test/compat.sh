@@ -13,7 +13,8 @@
 #
 # Each direction: the old tool migrates the first two, the new one takes
 # over - runs only the third, and undoes all three, the old tool's v2
-# migration from what the old tool recorded.
+# migration from what the old tool recorded. And the old tool dying halfway
+# through a v2 migration, the new one resuming it from the old one's state.
 set -u
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -174,6 +175,60 @@ echo "-- node db-migrate to this"
 transition node meta
 echo "-- this to node db-migrate"
 transition meta node
+
+# ------------------------------ an interrupted migration, carried on
+
+# one v2 migration that dies after two steps where DBM_TEST_DIE is set; its
+# files differ between the two, so neither skips the other's steps blind -
+# both say to roll back
+rm -f "$work"/node/migrations/* "$work"/meta/migrations/*
+cat >"$work/node/migrations/20261009150000-kennels.js" <<'EOF'
+'use strict';
+exports.migrate = async db => {
+  await db.createTable('kennels', { id: { type: 'int', primaryKey: true } });
+  await db.addColumn('kennels', 'name', { type: 'string' });
+  if (process.env.DBM_TEST_DIE) process.kill(process.pid, 'SIGKILL');
+  await db.createTable('runs', { id: { type: 'int', primaryKey: true } });
+};
+exports._meta = { version: 2, recovery: 'rollback' };
+EOF
+cat >"$work/meta/migrations/20261009150000-kennels.c" <<'EOF'
+#include <db_migrate.h>
+#include <signal.h>
+#include <stdlib.h>
+static int migrate(schema_t *db) {
+  db->createTable("kennels", {id: {type: "int", primaryKey: true}});
+  db->addColumn("kennels", "name", {type: "string"});
+  if (getenv("DBM_TEST_DIE") != NULL)
+    raise(SIGKILL);
+  return db->createTable("runs", {id: {type: "int", primaryKey: true}});
+}
+DBM_MIGRATION_V2_RECOVERY(migrate, "rollback")
+EOF
+
+interrupted() {
+  old=$1
+  new=$2
+
+  fresh
+  DBM_TEST_DIE=1 "run_$old" up >/dev/null 2>&1
+  expect "$old dies halfway through a v2 migration" \
+    '"fin":0 "f":"20261009150000-kennels" "done":2' \
+    "$(sql "select value from migrations_state where key = '__dbmigrate_state__'" |
+       grep -o '"fin":0\|"f":"[^"]*"\|"done":[0-9]*' | tr '\n' ' ' | sed 's/ $//')"
+
+  "run_$new" up --lock-timeout 1000 --lock-interval 200 >"$work/$new.recover" 2>&1
+  expect "$new takes the stale lock over and rolls the run back, then migrates" \
+    "1 kennels,migrations,migrations_state,runs" \
+    "$(grep -c 'recovering by rollback' "$work/$new.recover") $(tables)"
+  "run_$new" reset >/dev/null 2>&1
+  expect "and undoes it again" "$empty" "$(tables)"
+}
+
+echo "-- node db-migrate dies, this carries on"
+interrupted node meta
+echo "-- this dies, node db-migrate carries on"
+interrupted meta node
 
 echo "$failed failed"
 [ "$failed" -eq 0 ]
