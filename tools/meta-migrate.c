@@ -721,7 +721,8 @@ int main(int argc, char **argv) {
 
   bool needsMigrations =
       !asking && command != NULL && strncmp(command, "create", 6) != 0 &&
-      strncmp(command, "db:", 3) != 0;
+      strncmp(command, "db:", 3) != 0 &&
+      !(command in {"seed", "undo-seed", "reset-seed"});
 
   if (needsMigrations && !listAll(dir))
     return 1;

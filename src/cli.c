@@ -649,6 +649,12 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
+  /* what node db-migrate 1.0 says to them too */
+  if (options.command in {"seed", "undo-seed", "reset-seed"}) {
+    dbmSay(stderr, TEXT`[ERROR] Seeders are not supported, as by node db-migrate 1.0.\n`);
+    return 1;
+  }
+
   if (!(options.command in {"up", "down", "reset", "check", "sync", "db",
                             "fix"}))
     return usage();
