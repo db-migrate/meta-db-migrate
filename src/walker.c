@@ -51,6 +51,10 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
 
   migrator_t db = {.driver = driver, .dryRun = driver->dryRun};
+  /* compiled and opened now, if the launcher only knew its file */
+  if (!dbmLoaded(migration))
+    return -1;
+
   dbm_step_t body = direction == UP ? migration->up : migration->down;
 
   dbmSay(stdout, TEXT`[INFO] ${direction == UP ? "Processing migration"

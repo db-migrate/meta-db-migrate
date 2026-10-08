@@ -205,10 +205,9 @@ static dbm_migration_t[] migrations;
  * `/20261008120000-add-pets`, which is what node db-migrate writes into the
  * same table - so a database it migrated is one this can carry on.
  */
-void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
+static bool nameOf(const char *file, char *into, size_t room) {
 
   const char *base = strrchr(file, '/');
-  dbm_migration_t entry;
   size_t length;
 
   base = base != NULL ? base + 1 : file;
@@ -217,18 +216,82 @@ void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
   if (length > 2 && strcmp(base + length - 2, ".c") == 0)
     length -= 2;
 
-  if (length + 2 > sizeof entry.name) {
+  if (length + 2 > room) {
     dbmSay(stderr, TEXT`db-migrate: the name of ${file} is too long to record\n`);
+    return false;
+  }
+
+  into[0] = '/';
+  memcpy(into + 1, base, length);
+  into[length + 1] = '\0';
+  return true;
+}
+
+static dbm_migration_t *migrationNamed(const char *name) {
+  return migrations.find(entry, strcmp(entry->name, name) == 0);
+}
+
+/**
+ * From a migration's own DBM_MIGRATION. One the launcher registered lazily
+ * already has its entry, and this fills in its steps rather than adding a
+ * second migration of the same name.
+ */
+void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
+
+  dbm_migration_t entry;
+
+  memset(&entry, 0, sizeof entry);
+
+  if (!nameOf(file, entry.name, sizeof entry.name))
+    return;
+
+  dbm_migration_t *known = migrationNamed(entry.name);
+
+  if (known != NULL) {
+    known->up = up;
+    known->down = down;
     return;
   }
 
-  memset(&entry, 0, sizeof entry);
-  entry.name[0] = '/';
-  memcpy(entry.name + 1, base, length);
   entry.up = up;
   entry.down = down;
-
   migrations.push(entry);
+}
+
+void dbmRegisterLazily(const char *file, dbm_load_t load) {
+
+  dbm_migration_t entry;
+
+  memset(&entry, 0, sizeof entry);
+
+  if (!nameOf(file, entry.name, sizeof entry.name))
+    return;
+
+  /* compiled into this program already: nothing to load */
+  if (migrationNamed(entry.name) != NULL)
+    return;
+
+  dbmWrite(entry.file, sizeof entry.file, TEXT`${file}`);
+  entry.load = load;
+  migrations.push(entry);
+}
+
+bool dbmLoaded(const dbm_migration_t *migration) {
+
+  if (migration->load == NULL || migration->up != NULL ||
+      migration->down != NULL)
+    return true;
+
+  if (!migration->load(migration->file))
+    return false;
+
+  /* its DBM_MIGRATION filled this very entry in, if the name agreed */
+  if (migration->up == NULL && migration->down == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${migration->file} was loaded and registered nothing - it needs a DBM_MIGRATION(up, down)\n`);
+    return false;
+  }
+
+  return true;
 }
 
 static int byName(const void *a, const void *b) {

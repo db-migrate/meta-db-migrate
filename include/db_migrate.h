@@ -166,11 +166,22 @@ const char *migrator_t__dialect(migrator_t *self);
 
 typedef int (*dbm_step_t)(migrator_t *db);
 
+/**
+ * Makes a migration that is known only by its file into one that can run -
+ * the launcher compiles it and opens it, and its DBM_MIGRATION fills in `up`
+ * and `down`. Answers whether that worked, having said why when it did not.
+ */
+typedef bool (*dbm_load_t)(const char *file);
+
 typedef struct {
   /** As node db-migrate records it: the file name without `.c`, after a `/`. */
   char name[256];
   dbm_step_t up;
   dbm_step_t down;
+
+  /** For one registered by `dbmRegisterLazily`: where it is and how to load it. */
+  char file[1024];
+  dbm_load_t load;
 } dbm_migration_t;
 
 /**
@@ -179,6 +190,17 @@ typedef struct {
  * loads one it has just compiled. The name comes from the file.
  */
 void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down);
+
+/**
+ * A migration known by its file and not loaded yet. Which ones have to run is
+ * the database's to say, and the walker loads exactly those - so a project
+ * with three hundred migrations and a database at the two hundred and
+ * ninety-ninth compiles one of them, not three hundred.
+ */
+void dbmRegisterLazily(const char *file, dbm_load_t load);
+
+/** Makes sure a migration's steps are there, loading it if it was registered lazily. */
+bool dbmLoaded(const dbm_migration_t *migration);
 
 /** Every migration registered so far, sorted by name. */
 const dbm_migration_t *dbmMigrations(size_t *count);

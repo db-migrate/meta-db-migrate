@@ -10,12 +10,13 @@
  * application - so this does what a dynamic language does with a file: reads
  * it when it is asked to run it.
  *
- * Each migration is lowered by meta and compiled into a shared object of its
- * own, kept under `.meta-migrate/` by a hash of its text. Only one that
- * changed is compiled again; everything else is opened as it was. Opening one
- * runs its `DBM_MIGRATION` constructor, which registers it the same way it
- * registers in a program it is linked into, so from there on this is the same
- * code path as the shipped binary: `dbmCli` with the same arguments.
+ * The migrations directory is read by name only. Which migrations run is the
+ * database's to say, and only those are compiled - each lowered by meta into a
+ * shared object of its own, kept under `.meta-migrate/` by a hash of its text,
+ * so one that has not changed is opened as it was. Opening one runs its
+ * `DBM_MIGRATION` constructor, which registers it the same way it registers in
+ * a program it is linked into, so from there on this is the same code path as
+ * the shipped binary: `dbmCli` with the same arguments.
  *
  * Drivers are loaded the same way and only when the configuration names one,
  * so libpq is needed on a machine that talks to PostgreSQL and nowhere else.
@@ -233,17 +234,42 @@ static bool build(const char *source, const char *cache, char *object,
   return true;
 }
 
-static int byName(const void *a, const void *b) {
-  return strcmp(*(char *const *)a, *(char *const *)b);
+/** The migrations directory, compiled where it has to be and opened. */
+/**
+ * One migration, compiled if this text has not been before, and opened. The
+ * walker asks for it when the database says it has to run - not before.
+ */
+static bool compileAndOpen(const char *source) {
+
+  char object[2400];
+
+  mkdir(".meta-migrate", 0755);
+
+  if (!build(source, ".meta-migrate", object, sizeof object))
+    return false;
+
+  /**
+   * Lazily, and into the global table: a migration that calls a driver's
+   * own method - `db->createSequence` - names a function the driver brings,
+   * and the driver is opened before any migration is, from the
+   * configuration. Its symbols are resolved when they are first called.
+   */
+  if (dlopen(object, RTLD_LAZY | RTLD_GLOBAL) == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] cannot open ${object}: ${dlerror()}\n`);
+    return false;
+  }
+
+  return true;
 }
 
-/** The migrations directory, compiled where it has to be and opened. */
-static bool loadAll(const char *dir) {
+/**
+ * The migrations directory, by name only. Which of them are compiled is the
+ * database's to decide: the walker reads what has run, and loads exactly the
+ * ones it is about to run or undo. `check` compiles nothing at all.
+ */
+static bool listAll(const char *dir) {
 
-  const char *cache = ".meta-migrate";
   DIR *listing = opendir(dir);
-  char *[] sources;
-  bool ok = true;
 
   if (listing == NULL) {
     dbmSay(stderr, TEXT`[ERROR] there is no ${dir} directory here\n`);
@@ -260,38 +286,11 @@ static bool loadAll(const char *dir) {
       continue;
 
     dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
-    sources.push(strdup(path));
+    dbmRegisterLazily(path, compileAndOpen);
   }
 
   closedir(listing);
-
-  qsort(sources.items, sources.count, sizeof(char *), byName);
-  mkdir(cache, 0755);
-
-  for (source in sources) {
-
-    char object[2400];
-
-    if (ok && !build(*source, cache, object, sizeof object))
-      ok = false;
-
-    /**
-     * Lazily, and into the global table: a migration that calls a driver's
-     * own method - `db->createSequence` - names a function the driver
-     * brings, and the driver is not open until the configuration has been
-     * read. Its symbols are resolved when they are first called, which is
-     * after that.
-     */
-    if (ok && dlopen(object, RTLD_LAZY | RTLD_GLOBAL) == NULL) {
-      dbmSay(stderr, TEXT`[ERROR] cannot open ${object}: ${dlerror()}\n`);
-      ok = false;
-    }
-
-    free(*source);
-  }
-
-  sources.release();
-  return ok;
+  return true;
 }
 
 int main(int argc, char **argv) {
@@ -310,7 +309,7 @@ int main(int argc, char **argv) {
 
   dbmDriverDirectory = setting("DBM_DRIVERS", DBM_DRIVER_DIR);
 
-  if (!creating && !loadAll(dir))
+  if (!creating && !listAll(dir))
     return 1;
 
   return dbmCli(argc, argv);
