@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, compat]
+        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,35 +39,10 @@ jobs:
             libmysqlclient-dev libsqlite3-dev libyaml-dev sqlite3 \
             postgresql-client mysql-client openssh-server
 
-      - if: matrix.suite == 'compat'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - if: matrix.suite == 'compat'
-        uses: actions/checkout@v4
-        with:
-          repository: db-migrate/node-db-migrate
-          ref: ${{ vars.NODE_DB_MIGRATE_REF || 'master' }}
-          path: build/node-db-migrate
-
-      - if: matrix.suite == 'compat'
-        uses: actions/checkout@v4
-        with:
-          repository: db-migrate/pg
-          ref: ${{ vars.NODE_PG_REF || 'master' }}
-          path: build/pg
-
-      - if: matrix.suite == 'compat'
-        name: node dependencies
-        run: |
-          (cd build/node-db-migrate && npm install --omit=dev --no-audit --no-fund)
-          (cd build/pg && npm install --omit=dev --no-audit --no-fund)
-
       - name: databases
         run: |
           case ${{ matrix.suite }} in
-            pg|plugins|compat)
+            pg|plugins)
               docker run -d --name dbm-meta-pg -e POSTGRES_PASSWORD=dbm \
                 -e POSTGRES_DB=dbm -p 127.0.0.1:55432:5432 postgres:12-alpine
               until pg_isready -q -h 127.0.0.1 -p 55432; do sleep 1; done ;;
@@ -95,16 +70,66 @@ jobs:
 
       - name: test
         run: |
-          export NODE_DB_MIGRATE="$GITHUB_WORKSPACE/build/node-db-migrate"
-          export NODE_PG="$GITHUB_WORKSPACE/build/pg"
           case ${{ matrix.suite }} in
-            options|plugins|compat) test/${{ matrix.suite }}.sh ;;
+            options|plugins) test/${{ matrix.suite }}.sh ;;
             *) test/run.sh ${{ matrix.suite }} ;;
           esac
 
+  # its own job, so the node steps are only where node is
+  compat:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/meta
+        with:
+          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+
+      - name: system packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends libpq-dev \
+            libmysqlclient-dev libsqlite3-dev libyaml-dev postgresql-client
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/checkout@v4
+        with:
+          repository: db-migrate/node-db-migrate
+          ref: ${{ vars.NODE_DB_MIGRATE_REF || 'master' }}
+          path: build/node-db-migrate
+
+      - uses: actions/checkout@v4
+        with:
+          repository: db-migrate/pg
+          ref: ${{ vars.NODE_PG_REF || 'master' }}
+          path: build/pg
+
+      - name: node dependencies
+        run: |
+          (cd build/node-db-migrate && npm install --omit=dev --no-audit --no-fund)
+          (cd build/pg && npm install --omit=dev --no-audit --no-fund)
+
+      - name: database
+        run: |
+          docker run -d --name dbm-meta-pg -e POSTGRES_PASSWORD=dbm \
+            -e POSTGRES_DB=dbm -p 127.0.0.1:55432:5432 postgres:12-alpine
+          until pg_isready -q -h 127.0.0.1 -p 55432; do sleep 1; done
+
+      - name: build
+        run: ./build.sh
+
+      - name: test
+        env:
+          NODE_DB_MIGRATE: ${{ github.workspace }}/build/node-db-migrate
+          NODE_PG: ${{ github.workspace }}/build/pg
+        run: test/compat.sh
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, compat]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
