@@ -243,7 +243,7 @@ individual slots in it (`src/drivers/pg_driver.h`).
 test/run.sh                   # against all four databases
 test/plugins.sh               # yaml, plugins/, the ssh tunnel (own sshd)
 test/options.sh               # --ignore-on-init, --log-level, dry runs
-test/compat.sh                # node db-migrate and this on the same database
+test/compat.sh                # moving a project from node db-migrate and back
 ```
 
 `test/run.sh [driver...]` runs the same cycle against every database: up,
@@ -256,7 +256,10 @@ databases (`test/database.json`) are started by the commands at the top of
 
 `.github/workflows/ci.yml` runs every suite on Ubuntu 24.04, each in its own
 job: `run.sh` once per database (started with `docker run`, as at the top of
-`test/run.sh`), plus `options.sh` and `plugins.sh`. meta is not on GitHub's
+`test/run.sh`), plus `options.sh`, `plugins.sh` and `compat.sh`. The last
+one moves a project from node db-migrate to this and back, against
+node-db-migrate and its pg driver as published (`NODE_DB_MIGRATE_REF`,
+`NODE_PG_REF`, default `master`). meta is not on GitHub's
 runners. The workflow checks it out from the repository the variable
 `METALANGUAGE_REPOSITORY` names, at `METALANGUAGE_REF` (default
 `parser-rewrite`), with the secret `METALANGUAGE_TOKEN` if that repository is
