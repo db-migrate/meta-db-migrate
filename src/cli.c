@@ -14,15 +14,18 @@
  *   app migrate create:billing add-tax a new one in that scope
  *
  *   -e, --env NAME       which entry of database.json (NODE_ENV, then dev)
- *   --config FILE        database.json somewhere else
+ *   --config FILE        database.json somewhere else, or database.yml
  *   --dry-run            print the statements instead of sending them
  *   --sql-file           `create` writes an up and a down .sql file instead
  *   --migrations-dir D   where `create` writes (migrations)
  *
- * Without a database.json, DATABASE_URL is the configuration, as it is for
- * node db-migrate on every platform that sets one.
+ * Without a database.json, a database.yml (or whatever a plugin reads) is
+ * the configuration, and without that DATABASE_URL, as it is for node
+ * db-migrate on every platform that sets one. A connection with a `tunnel`
+ * is reached through it.
  */
 #include <db_migrate_driver.h>
+#include <db_migrate_plugin.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +43,7 @@ typedef struct {
   bool countGiven;
   bool dryRun;
   bool sqlFile;
+  const char *template;
   bool verbose;
   bool noTransactions;
   bool checkOnly;
@@ -70,6 +74,7 @@ commands:
   fix                rebuild node's state from the v2 migrations that ran
                      (--backup-state keeps the old one)
   create name        a new migration in migrations/
+                     (--sql-file or --template NAME for another kind)
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
   db:create name     a database, if it is not there yet
@@ -77,7 +82,7 @@ commands:
 
 options:
   -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
-  --config FILE               database.json somewhere else
+  --config FILE               database.json somewhere else, or a .yml
   -m, --migrations-dir DIR    where migrations are (migrations)
   -c, --count N               at most N migrations
   -t, --table NAME            the table the history is kept in (migrations)
@@ -89,6 +94,7 @@ options:
   -v, --verbose               print every statement as it is sent
   --non-transactional         no transaction around a migration
   --sql-file                  create: an up and a down .sql file instead
+  --template NAME             create: what the plugin of that name writes
   -i, --version               print the version
   -h, --help                  this
 `);
@@ -140,6 +146,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->dryRun = true;
     else if (strcmp(word, "--sql-file") == 0)
       into->sqlFile = true;
+    else if (strcmp(word, "--template") == 0 && hasNext)
+      into->template = argv[++i];
     else if (word[0] == '-') {
       dbmSay(stderr, TEXT`unknown option ${word}\n`);
       return false;
@@ -235,31 +243,87 @@ static json_t resolved(json_t entry) {
   return meta_jsonFromMut(doc);
 }
 
+static bool exists(const char *path) {
+  struct stat seen;
+  return stat(path, &seen) == 0;
+}
+
+/**
+ * The file the configuration is in: the one --config names, database.json,
+ * or database.yml and the other endings plugins read - in that order.
+ */
+static const char *configFile(const options_t *options, char *found,
+                              size_t room) {
+
+  const char *extension;
+
+  if (options->config != NULL)
+    return options->config;
+
+  if (exists("database.json"))
+    return "database.json";
+
+  for (size_t at = 0; (extension = dbmConfigExtension(at)) != NULL; ++at) {
+    dbmWrite(found, room, TEXT`database${extension}`);
+
+    if (exists(found))
+      return found;
+  }
+
+  return "database.json";
+}
+
+/** The whole file, read as JSON or by the plugin for its ending. */
+static json_t configFileRead(const char *path, char *why, size_t room) {
+
+  dbm_config_loader_t load = dbmConfigLoaderFor(path);
+
+  if (load != NULL) {
+
+    json_t read = meta_toJSON("null");
+
+    if (!load(path, &read, why, room) && why[0] == '\0')
+      dbmWrite(why, room, TEXT`${path} could not be read`);
+
+    return read;
+  }
+
+  char *text = slurp(path);
+  json_t file = meta_toJSON(text);
+  free(text);
+
+  const char *dot = strrchr(path, '.');
+
+  if (file.refused != NULL && dot != NULL && strcmp(dot, ".json") != 0)
+    dbmWrite(why, room, TEXT`nothing in this program reads ${dot} files - link the plugin that does (build-app.sh <app> <out> <driver> ${strcmp(dot, ".yml") == 0 || strcmp(dot, ".yaml") == 0 ? "yaml" : "<plugin>"})`);
+  else if (file.refused != NULL)
+    dbmWrite(why, room, TEXT`${path} is not JSON: ${file.refused}`);
+
+  return file;
+}
+
 /** The configuration to open, or one that answers `isNothing` and a reason. */
 static json_t configuration(const options_t *options, char *why, size_t room) {
 
-  const char *path = options->config != NULL ? options->config : "database.json";
-  char *text = slurp(path);
+  char found[64];
+  const char *path = configFile(options, found, sizeof found);
 
-  if (text == NULL) {
+  if (!exists(path)) {
 
     const char *url = getenv("DATABASE_URL");
 
-    if (url != NULL && url[0] != '\0')
+    if (options->config == NULL && url != NULL && url[0] != '\0')
       return {driver: driverOf(url), url: url};
 
-    dbmWrite(why, room, TEXT`there is no ${path} here and no DATABASE_URL`);
+    dbmWrite(why, room, TEXT`there is no ${path} here${options->config == NULL ? " and no DATABASE_URL" : ""}`);
     return meta_toJSON("null");
   }
 
-  json_t file = meta_toJSON(text);
-  free(text);
+  json_t file = configFileRead(path, why, room);
   defer file.release();
 
-  if (file.refused != NULL) {
-    dbmWrite(why, room, TEXT`${path} is not JSON: ${file.refused}`);
+  if (why[0] != '\0')
     return meta_toJSON("null");
-  }
 
   const char *env = options->env;
 
@@ -356,6 +420,18 @@ static int create(const options_t *options) {
   strftime(stamp, sizeof stamp, "%Y%m%d%H%M%S", &utc);
 
   mkdir(dir, 0755);
+
+  if (options->template != NULL) {
+
+    dbm_template_t write = dbmTemplateNamed(options->template);
+
+    if (write == NULL) {
+      dbmSay(stderr, TEXT`[ERROR] there is no template called ${options->template} - a plugin registers one with dbmRegisterTemplate\n`);
+      return 1;
+    }
+
+    return write(dir, stamp, options->name);
+  }
 
   if (options->sqlFile)
     return createSqlFiles(dir, stamp, options->name);
@@ -487,12 +563,18 @@ int dbmCli(int argc, char **argv) {
   }
 
   json_t config = configuration(&options, why, sizeof why);
-  defer config.release();
+  dbm_tunnel_t *tunnel = NULL;
 
-  if (why[0] != '\0') {
+  /* through the tunnel, if the connection has one, for everything below */
+  if (why[0] != '\0' || !dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    config.release();
     return 1;
   }
+
+  /* only now: a defer takes the value it is given, and the tunnel replaced it */
+  defer config.release();
+  defer dbmTunnelClose(tunnel);
 
   if (strcmp(options.command, "db") == 0)
     return database(&options, config);
