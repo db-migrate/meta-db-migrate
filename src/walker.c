@@ -100,6 +100,51 @@ static bool onlyComments(const char *sql) {
 }
 
 /**
+ * A v2 migration: no transaction - its rollback is its own record run
+ * backwards - and the line in the migrations table written after it, as node
+ * writes it.
+ */
+static int stepV2(driver_t *driver, const dbm_migration_t *migration,
+                  direction_t direction) {
+
+  char why[512] = "";
+
+  if (driver->state == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)} is a v2 migration, and there is no state table to keep it in\n`);
+    return -1;
+  }
+
+  int answer =
+      direction == UP
+          ? dbmUpV2(driver, driver->state, migration->name, migration->migrate,
+                    why, sizeof why)
+          : dbmDownV2(driver, driver->state, migration->name, why, sizeof why);
+
+  if (answer == 0) {
+
+    int recorded =
+        direction == UP
+            ? driver->addMigrationRecord(driver, migration->name)
+            : driver->deleteMigrationRecord(driver, migration->name);
+
+    if (recorded != 0)
+      dbmWrite(why, sizeof why, TEXT`${driver->error}`);
+
+    answer = recorded;
+  }
+
+  if (answer == 0 && direction == UP)
+    dbmEndV2(driver->state, driver->dryRun);
+
+  if (answer != 0) {
+    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
+    return -1;
+  }
+
+  return 0;
+}
+
+/**
  * The migration lock, when there is something to do - and the record of what
  * has run read again under it, because another process may have done the
  * work while this one waited. Nothing on a dry run, as node has it.
@@ -149,6 +194,9 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
 
   dbmSay(stdout, TEXT`[INFO] ${direction == UP ? "Processing migration"
                                            : "Undoing migration"} ${shown(migration->name)}\n`);
+
+  if (migration->migrate != NULL)
+    return stepV2(driver, migration, direction);
 
   if (body == NULL && sql == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)} has no ${way}\n`);

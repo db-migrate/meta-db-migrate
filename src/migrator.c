@@ -288,6 +288,26 @@ void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
   migrations.push(entry);
 }
 
+void dbmRegisterV2(const char *file, dbm_v2_t migrate) {
+
+  dbm_migration_t entry;
+
+  memset(&entry, 0, sizeof entry);
+
+  if (!nameOf(file, entry.name, sizeof entry.name))
+    return;
+
+  dbm_migration_t *known = migrationNamed(entry.name);
+
+  if (known != NULL) {
+    known->migrate = migrate;
+    return;
+  }
+
+  entry.migrate = migrate;
+  migrations.push(entry);
+}
+
 void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
 
   dbm_migration_t entry;
@@ -309,7 +329,8 @@ void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
 bool dbmLoaded(const dbm_migration_t *migration) {
 
   if (migration->load == NULL || migration->up != NULL ||
-      migration->down != NULL || migration->upSql != NULL)
+      migration->down != NULL || migration->upSql != NULL ||
+      migration->migrate != NULL)
     return true;
 
   if (!migration->load(migration->file, migration->name))
@@ -317,7 +338,7 @@ bool dbmLoaded(const dbm_migration_t *migration) {
 
   /* its DBM_MIGRATION filled this very entry in, if the name agreed */
   if (migration->up == NULL && migration->down == NULL &&
-      migration->upSql == NULL) {
+      migration->upSql == NULL && migration->migrate == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${migration->file} was loaded and registered nothing - it needs a DBM_MIGRATION(up, down)\n`);
     return false;
   }

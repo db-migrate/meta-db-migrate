@@ -58,6 +58,12 @@ struct driver_t {
   bool verbose;
 
   /**
+   * Whether `removeColumn` may be given a recreation strategy for a NOT NULL
+   * column - node's `_meta.supports.columnStrategies`.
+   */
+  bool columnStrategies;
+
+  /**
    * The connection node's state is kept through, and the table it is kept
    * in. Set by the command line; v2 migrations and the lock need it.
    */
@@ -328,6 +334,10 @@ char *dbmStateBegin(dbm_state_t *self, const char *key);
 int dbmStateSave(dbm_state_t *self, const char *key, const char *migration);
 int dbmStateForget(dbm_state_t *self, const char *key);
 
+/** v2 migrations, learned and undone the way node does it. */
+int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
+            dbm_v2_t migrate, char *why, size_t room);
+int dbmEndV2(dbm_state_t *state, bool dry);
 int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
               char *why, size_t room);
 

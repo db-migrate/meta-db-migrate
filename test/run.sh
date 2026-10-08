@@ -156,6 +156,14 @@ databaseExists() {
   esac
 }
 
+# `key` is a word MySQL keeps for itself
+keyColumn() {
+  case $driver in
+    mysql) echo '`key`' ;;
+    *) echo '"key"' ;;
+  esac
+}
+
 # a failure keeps its DDL on MySQL: it commits before every statement of it
 halfDone() {
   case $driver in
@@ -280,6 +288,20 @@ for driver in $drivers; do
     "$(tables | tr ',' '\n' | grep -x 'half_done' || true)"
   expect "its later steps never ran" "" \
     "$(tables | tr ',' '\n' | grep -x 'never_made' || true)"
+  # a v2 migration that fails is rolled back from its own record
+  rm "$failing/migrations/20261008120900-goes-wrong.c"
+  cp "$here"/migrations/failing-v2/*.c "$failing/migrations/"
+  "$top/build-app.sh" "$failing" "$failing/app" "$driver" >/dev/null 2>&1
+  "$failing/app" up -e "$driver" >"$failing/v2.out" 2>&1
+  expect "a failing v2 migration fails the run" 1 "$?"
+  expect "and is undone from its record, without a transaction" "" \
+    "$(tables | tr ',' '\n' | grep -x 'v2_half_done' || true)"
+  expect "leaving no record of itself in the state" 0 \
+    "$(sql "select count(*) from migrations_state where $(keyColumn) like '%v2-goes-wrong'")"
+  cp "$here/migrations/failing/20261008120900-goes-wrong.c" "$failing/migrations/"
+  rm "$failing/migrations/20261008120950-v2-goes-wrong.c"
+  "$top/build-app.sh" "$failing" "$failing/app" "$driver" >/dev/null 2>&1
+
   expect "the error is the database's own" yes \
     "$(grep -q 'table_that_does_not_exist' "$failing/up.out" && echo yes)"
 
@@ -341,7 +363,7 @@ cd "$work"
 empty
 
 "$top/build/meta-migrate" up -e pg >/dev/null 2>&1
-"$top/build/meta-migrate" down -e pg >/dev/null 2>&1
+"$top/build/meta-migrate" down -e pg 20261008120260 >/dev/null 2>&1
 sed -i 's/increment: 10/increment: 5/' migrations/20261008120300-pg-only.c
 "$top/build/meta-migrate" up -e pg >"$work/launch.out" 2>&1
 expect "an edit recompiles only what changed" 1 \
@@ -349,7 +371,7 @@ expect "an edit recompiles only what changed" 1 \
 expect "and runs the edited version" 5 \
   "$(sql "select increment_by from pg_sequences where sequencename = 'pet_tag_no'")"
 expect "under the name it always had" "/20261008120300-pg-only" \
-  "$(sql 'select name from migrations order by id desc limit 1')"
+  "$(sql "select name from migrations where name like '%pg-only'")"
 "$top/build/meta-migrate" reset -e pg >/dev/null 2>&1
 cd "$here"
 

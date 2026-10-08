@@ -521,6 +521,9 @@ driver_t *dbmPgConnect(json_t config, char *why, size_t room, const char *name,
   self->columnDef = dbmPgColumnDef;
   self->changeColumn = dbmPgChangeColumn;
 
+  /* `delay` and `defaultValue` for a NOT NULL column v2 drops, as node's pg */
+  self->columnStrategies = true;
+
   if (strcmp(name, "cockroachdb") != 0)
     self->createDatabase = pgCreateDatabase;
 

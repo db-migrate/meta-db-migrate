@@ -169,6 +169,64 @@ const char *migrator_t__dialect(migrator_t *self);
 typedef int (*dbm_step_t)(migrator_t *db);
 
 /**
+ * What a v2 migration is handed - node's `_meta: {version: 2}`.
+ *
+ * A v2 migration has no `down`. Every change it makes is learned: the schema
+ * it builds is kept in node's state table, and so is how to undo each step,
+ * which is what `down` - and a rollback when one fails halfway - runs
+ * backwards. That is why it may only change the schema: a statement written
+ * by hand cannot be undone by anybody but the person who wrote it, so there
+ * is no `runSql` here, as there is none in node's v2.
+ *
+ *   static int migrate(schema_t *db) {
+ *     db->createTable("pets", {id: {type: "int", primaryKey: true}});
+ *     return db->addIndex("pets", "pets_id_idx", ["id"]);
+ *   }
+ *
+ *   DBM_MIGRATION_V2(migrate)
+ *
+ * Every table it creates gets a column `__dbmigrate__flag`, as node's do.
+ */
+typedef struct schema_t schema_t;
+
+typedef int (*dbm_v2_t)(schema_t *db);
+
+int schema_t__createTable(schema_t *self, const char *table, json_t spec);
+int schema_t__dropTable(schema_t *self, const char *table);
+int schema_t__renameTable(schema_t *self, const char *from, const char *to);
+int schema_t__addColumn(schema_t *self, const char *table, const char *column,
+                        json_t spec);
+int schema_t__removeColumn(schema_t *self, const char *table,
+                           const char *column);
+
+/**
+ * A NOT NULL column cannot be dropped without saying how it comes back:
+ * `{columnStrategy: "defaultValue", passthrough: {defaultValue: 0}}` adds it
+ * again with that default, `{columnStrategy: "delay"}` renames it out of the
+ * way instead of dropping it, as node does.
+ */
+int schema_t__removeColumnWith(schema_t *self, const char *table,
+                               const char *column, json_t options);
+int schema_t__renameColumn(schema_t *self, const char *table, const char *from,
+                           const char *to);
+int schema_t__changeColumn(schema_t *self, const char *table,
+                           const char *column, json_t spec);
+int schema_t__addIndex(schema_t *self, const char *table, const char *name,
+                       json_t columns);
+int schema_t__addUniqueIndex(schema_t *self, const char *table,
+                             const char *name, json_t columns);
+int schema_t__removeIndex(schema_t *self, const char *table, const char *name);
+int schema_t__addForeignKey(schema_t *self, const char *table,
+                            const char *referenced, const char *name,
+                            json_t mapping, json_t rules);
+int schema_t__removeForeignKey(schema_t *self, const char *table,
+                               const char *name);
+
+bool schema_t__hasFailed(schema_t *self);
+const char *schema_t__lastError(schema_t *self);
+int schema_t__fail(schema_t *self, text_t why);
+
+/**
  * Makes a migration that is known only by its file into one that can run -
  * the launcher compiles it and opens it, and its DBM_MIGRATION fills in `up`
  * and `down`. Answers whether that worked, having said why when it did not.
@@ -191,6 +249,9 @@ typedef struct {
    */
   char *upSql;
   char *downSql;
+
+  /** A v2 migration: one function, and `down` is learned from it. */
+  dbm_v2_t migrate;
 } dbm_migration_t;
 
 /**
@@ -239,6 +300,13 @@ void dbmForgetMigrations(void);
 #define DBM_MIGRATION(up, down)                                                \
   __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
     dbmRegister(__FILE__, up, down);                                           \
+  }
+
+void dbmRegisterV2(const char *file, dbm_v2_t migrate);
+
+#define DBM_MIGRATION_V2(migrate)                                              \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterV2(__FILE__, migrate);                                          \
   }
 
 /* ------------------------------------------------------------- drivers */
