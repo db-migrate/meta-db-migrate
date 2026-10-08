@@ -23,8 +23,10 @@
  * already existed cannot: a column added to it is not usable until the
  * transaction commits - `column "slug" does not exist` - and a column dropped
  * from it still holds on to its type. Measured on v24.3 with both schema
- * changers. So adding a column to an existing table and filling it are two
- * migrations, and so are dropping a column and dropping the enum it used.
+ * changers. Creating an enum and using it, in a new table or a new column, is
+ * one transaction; so is dropping a table and then its enum. Adding a column
+ * to an existing table and filling it are two migrations, and so are dropping
+ * a column and then the enum it used.
  */
 #include "pg_driver.h"
 
