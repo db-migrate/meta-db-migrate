@@ -235,6 +235,13 @@ for driver in $drivers; do
   expect "reset undoes everything" 0 "$(sql 'select count(*) from migrations')"
   expect "and leaves only its own table" "migrations" "$(tables)"
 
+  # the history in a table of another name, beside the usual one
+  "$app" up -e "$driver" -t history -c 1 >/dev/null 2>&1
+  expect "a history table of its own name" 1 \
+    "$(sql 'select count(*) from history')"
+  "$app" reset -e "$driver" -t history >/dev/null 2>&1
+  sql "drop table history" >/dev/null
+
   cd "$failing"
   "$failing/app" up -e "$driver" >"$failing/up.out" 2>&1
   expect "a failing migration fails the run" 1 "$?"
@@ -248,6 +255,11 @@ for driver in $drivers; do
     "$(tables | tr ',' '\n' | grep -x 'never_made' || true)"
   expect "the error is the database's own" yes \
     "$(grep -q 'table_that_does_not_exist' "$failing/up.out" && echo yes)"
+
+  # without a transaction the steps before the failure stay, everywhere
+  "$failing/app" up -e "$driver" --non-transactional >/dev/null 2>&1
+  expect "--non-transactional keeps what ran before the failure" "half_done" \
+    "$(tables | tr ',' '\n' | grep -x 'half_done' || true)"
 
   cd "$work"
   empty
