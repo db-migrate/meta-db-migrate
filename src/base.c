@@ -159,15 +159,21 @@ int dbmSend(driver_t *self, dbm_text_t *sql) {
     return 0;
   }
 
+  if (self->verbose)
+    dbmSay(stdout, TEXT`[SQL] ${sql->text}\n`);
+
   return self->runSql(self, sql->text);
 }
 
-static int sendQuery(driver_t *self, const sql_t *query, json_t *rows) {
+int dbmQuery(driver_t *self, const sql_t *query, json_t *rows) {
 
   if (self->dryRun) {
     dbmSay(stdout, TEXT`${query->text}; -- ${query->count} parameter(s)\n`);
     return 0;
   }
+
+  if (self->verbose)
+    dbmSay(stdout, TEXT`[SQL] ${query->text} -- ${query->count} parameter(s)\n`);
 
   return self->query(self, query, rows);
 }
@@ -937,7 +943,7 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row) {
   }
 
   sql_t query = SQL(chunks.items, chunks.count, values.items, values.count);
-  int answer = sendQuery(self, &query, NULL);
+  int answer = dbmQuery(self, &query, NULL);
 
   query.release();
 
@@ -1012,7 +1018,7 @@ int dbmBaseAddMigrationRecord(driver_t *self, const char *name) {
       SQL`INSERT INTO ${&table} (name, run_on) VALUES (${name}, ${stamp})`;
   defer query.release();
 
-  return sendQuery(self, &query, NULL);
+  return dbmQuery(self, &query, NULL);
 }
 
 int dbmBaseDeleteMigrationRecord(driver_t *self, const char *name) {
@@ -1023,7 +1029,7 @@ int dbmBaseDeleteMigrationRecord(driver_t *self, const char *name) {
   sql_t query = SQL`DELETE FROM ${&table} WHERE name = ${name}`;
   defer query.release();
 
-  return sendQuery(self, &query, NULL);
+  return dbmQuery(self, &query, NULL);
 }
 
 /* ------------------------------------------------------------------ */

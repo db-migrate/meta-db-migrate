@@ -141,12 +141,7 @@ int migrator_t__run(migrator_t *self, sql_t query) {
     return -1;
   }
 
-  if (self->driver->dryRun) {
-    dbmSay(stdout, TEXT`${query.text}; -- ${query.count} parameter(s)\n`);
-    answer = 0;
-  } else {
-    answer = self->driver->query(self->driver, &query, NULL);
-  }
+  answer = dbmQuery(self->driver, &query, NULL);
 
   query.release();
   return settle(self, answer);
@@ -157,9 +152,12 @@ json_t migrator_t__all(migrator_t *self, sql_t query) {
   json_t rows = meta_toJSON("[]");
   int answer = 0;
 
-  if (!blocked(self) && !self->driver->dryRun) {
+  /* a dry run prints the query and answers no rows, as a database would */
+  if (!blocked(self) && self->driver->dryRun) {
+    answer = dbmQuery(self->driver, &query, NULL);
+  } else if (!blocked(self)) {
     rows.release();
-    answer = self->driver->query(self->driver, &query, &rows);
+    answer = dbmQuery(self->driver, &query, &rows);
 
     if (answer != 0)
       rows = meta_toJSON("[]");

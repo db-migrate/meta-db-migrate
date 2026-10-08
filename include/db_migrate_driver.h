@@ -54,6 +54,16 @@ struct driver_t {
   /** Set by the walker for a dry run; every statement is printed instead. */
   bool dryRun;
 
+  /** Every statement is printed as well as sent - `--verbose`. */
+  bool verbose;
+
+  /**
+   * No transaction around a migration - `--non-transactional`, for what a
+   * database refuses to do inside one, like PostgreSQL's CREATE INDEX
+   * CONCURRENTLY. The record is still written after the migration.
+   */
+  bool noTransactions;
+
   /** The table the walker keeps its records in. */
   const char *migrationTable;
 
@@ -225,5 +235,8 @@ const char *dbmColumnType(json_t spec);
 
 /** Runs or, on a dry run, prints. The way every generic version sends SQL. */
 int dbmSend(driver_t *self, dbm_text_t *sql);
+
+/** The same for a statement with parameters, and the rows when they are wanted. */
+int dbmQuery(driver_t *self, const sql_t *query, json_t *rows);
 
 #endif
