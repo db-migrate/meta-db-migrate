@@ -26,7 +26,7 @@ jobs:
       matrix:
         suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, static]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/meta
         with:
@@ -79,7 +79,7 @@ jobs:
   compat:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/meta
         with:
@@ -91,17 +91,17 @@ jobs:
           sudo apt-get install -yq --no-install-recommends libpq-dev \
             libmysqlclient-dev libsqlite3-dev libyaml-dev postgresql-client
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: db-migrate/node-db-migrate
           ref: ${{ vars.NODE_DB_MIGRATE_REF || 'master' }}
           path: build/node-db-migrate
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: db-migrate/pg
           ref: ${{ vars.NODE_PG_REF || 'master' }}
@@ -134,7 +134,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/meta
         with:
