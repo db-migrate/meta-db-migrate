@@ -179,7 +179,8 @@ for driver in $drivers; do
     cp "$here/main.c" "$here/database.json" "$into/"
     cp "$here"/migrations/common/*.c "$here/migrations/$driver"/*.c \
       "$into/migrations/"
-    cp -r "$here/migrations/common/sqls" "$into/migrations/"
+    cp -r "$here/migrations/common/sqls" "$here/migrations/common/billing" \
+      "$into/migrations/"
   done
 
   cp "$here"/migrations/failing/*.c "$failing/migrations/"
@@ -206,6 +207,19 @@ for driver in $drivers; do
   expect "a migration in SQL, quotes and all" "it's; \"quoted\" fine" \
     "$(sql "select body from notes")"
   expect "and what only $driver does" "$(ownWanted)" "$(own)"
+
+  # a scope is a directory of its own, and only `up:billing` runs it
+  "$app" up:billing -e "$driver" >/dev/null 2>&1
+  expect "up:scope runs the scope, recorded with its name" \
+    "billing/20261008121000-invoices" \
+    "$(sql "select name from migrations where name like 'billing/%'")"
+  "$app" down -e "$driver" >/dev/null 2>&1
+  expect "a plain down leaves the scope alone" 1 \
+    "$(sql "select count(*) from migrations where name like 'billing/%'")"
+  "$app" up -e "$driver" >/dev/null 2>&1
+  "$app" down:billing -e "$driver" >/dev/null 2>&1
+  expect "down:scope undoes it" 0 \
+    "$(sql "select count(*) from migrations where name like 'billing/%'")"
 
   "$app" down -e "$driver" -c $((total - 1)) >/dev/null 2>&1
   expect "down -c undoes all but the first" 1 \
