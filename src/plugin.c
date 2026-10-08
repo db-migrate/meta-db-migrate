@@ -13,6 +13,7 @@
 #include <db_migrate_plugin.h>
 
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,21 +56,35 @@ void dbmRegisterTemplate(const char *name, dbm_template_t write) {
   templates.push((dbm_template_entry_t){name, write});
 }
 
+/** Why the last shipped plugin that is there could not be opened. */
+static char shippedError[600];
+
+const char *dbmPluginLoadError(void) {
+  return shippedError;
+}
+
 /**
  * A shipped plugin, opened from where the launcher keeps the drivers. Quiet
  * when it is not there: the caller says what was missing, in its own words.
+ * When it is there and does not open - a library it needs is not installed -
+ * that is kept, because then the caller's words would be wrong.
  */
 static void openShipped(const char *name) {
 
   char path[1024];
+  struct stat seen;
 
   if (dbmDriverDirectory == NULL)
     return;
 
   dbmWrite(path, sizeof path, TEXT`${dbmDriverDirectory}/libdbmigrate-${name}.so`);
 
-  if (dlopen(path, RTLD_NOW | RTLD_GLOBAL) == NULL && getenv("DBM_DEBUG"))
-    dbmSay(stderr, TEXT`[DEBUG] ${dlerror()}\n`);
+  if (stat(path, &seen) != 0)
+    return;
+
+  if (dlopen(path, RTLD_NOW | RTLD_GLOBAL) == NULL)
+    dbmWrite(shippedError, sizeof shippedError,
+             TEXT`the ${name} plugin could not be loaded: ${dlerror()}`);
 }
 
 static bool endsWith(const char *text, const char *end) {
@@ -199,6 +214,11 @@ bool dbmTunnelOpen(json_t *config, dbm_tunnel_t **opened, char *why,
   if (entry == NULL) {
     openShipped(type);
     entry = tunnelOfType(type);
+  }
+
+  if (entry == NULL && shippedError[0] != '\0') {
+    dbmWrite(why, room, TEXT`${shippedError}`);
+    return false;
   }
 
   if (entry == NULL) {

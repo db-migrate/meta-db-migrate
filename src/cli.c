@@ -310,7 +310,9 @@ static json_t configFileRead(const char *path, char *why, size_t room) {
 
   const char *dot = strrchr(path, '.');
 
-  if (file.refused != NULL && dot != NULL && strcmp(dot, ".json") != 0)
+  if (file.refused != NULL && dbmPluginLoadError()[0] != '\0')
+    dbmWrite(why, room, TEXT`${path} needs a plugin: ${dbmPluginLoadError()}`);
+  else if (file.refused != NULL && dot != NULL && strcmp(dot, ".json") != 0)
     dbmWrite(why, room, TEXT`nothing in this program reads ${dot} files - link the plugin that does (build-app.sh <app> <out> <driver> ${strcmp(dot, ".yml") == 0 || strcmp(dot, ".yaml") == 0 ? "yaml" : "<plugin>"})`);
   else if (file.refused != NULL)
     dbmWrite(why, room, TEXT`${path} is not JSON: ${file.refused}`);

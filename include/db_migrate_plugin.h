@@ -49,6 +49,12 @@ void dbmRegisterConfigLoader(const char *extension, dbm_config_loader_t load);
 /** The loader for a file, by its ending, or NULL. */
 dbm_config_loader_t dbmConfigLoaderFor(const char *file);
 
+/**
+ * Why a shipped plugin that the launcher has could not be opened - a library
+ * it needs is not installed - or "" when none failed.
+ */
+const char *dbmPluginLoadError(void);
+
 /** The registered endings, for a project that has no database.json. */
 const char *dbmConfigExtension(size_t at);
 
