@@ -17,12 +17,13 @@
 #
 #   ./build.sh
 #   META_ROOT=/path/to/metalanguage ./build.sh
+#   DBM_BUILD_DIR=/elsewhere ./build.sh       instead of build/
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "${META_ROOT:-$here/../../metalanguage}" && pwd)
 meta="$root/meta"
-out="$here/build"
+out="${DBM_BUILD_DIR:-$here/build}"
 cc=${CC:-cc}
 flags="-std=gnu11 -Wall -Wextra -Werror -g ${CFLAGS:-}"
 
