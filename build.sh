@@ -3,6 +3,8 @@
 # Builds everything under build/:
 #
 #   libdbmigrate.a          the core and the runtime
+#   libdbmigrate-core.a     the core alone, for a program that links meta's
+#                           runtime itself (lib/libmeta_runtime.a)
 #   libdbmigrate-<d>.a      one driver or plugin, for a program that links it
 #   libdbmigrate-<d>.so     the same, for the launcher to load
 #   meta-migrate            the development launcher
@@ -111,6 +113,7 @@ fi
 
 rm -f "$out"/libdbmigrate*.a
 ar rcs "$out/libdbmigrate.a" $core $runtime
+ar rcs "$out/libdbmigrate-core.a" $core
 
 # what each driver is made of, and what it needs from the system
 objectsOf() {
