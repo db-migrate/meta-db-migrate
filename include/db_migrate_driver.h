@@ -338,6 +338,18 @@ int dbmStateForget(dbm_state_t *self, const char *key);
 int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
             dbm_v2_t migrate, char *why, size_t room);
 int dbmEndV2(dbm_state_t *state, bool dry);
+int dbmFixV2(driver_t *driver, dbm_state_t *state, const char *name,
+             dbm_v2_t migrate, char *why, size_t room);
+
+/**
+ * `fix --backup-state`: the schema as it was written to
+ * `<table>_b_<seconds>.dbmigrate`, and the table renamed to that name, before
+ * an empty one is made - as node keeps a backup.
+ */
+int dbmStateBackup(dbm_state_t *self);
+
+/** An empty schema, in memory, for `fix` to rebuild from. */
+void dbmStateForgetSchema(dbm_state_t *self);
 int dbmDownV2(driver_t *driver, dbm_state_t *state, const char *name,
               char *why, size_t room);
 

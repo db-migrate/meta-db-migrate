@@ -433,6 +433,80 @@ int dbmSync(driver_t *driver, const char *destination, bool dryRun) {
   return dbmUp(driver, 0, destination, dryRun);
 }
 
+/**
+ * node's `fix`: the state rebuilt from the v2 migrations that ran, oldest
+ * first - learned again against an empty schema, nothing sent. A v1
+ * migration keeps no schema, and is passed over with a word. With a backup,
+ * the state as it was goes to a file and to a table of its own first.
+ */
+int dbmFix(driver_t *driver, bool backup, bool dryRun) {
+
+  driver->dryRun = dryRun;
+
+  if (driver->state == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] fix needs the state table\n`);
+    return -1;
+  }
+
+  /**
+   * The backup before the lock, where node makes it: renaming the table
+   * takes the lock row along with everything else, and a lock held in the
+   * backup is a lock nobody holds.
+   */
+  if (backup && !dryRun && dbmStateBackup(driver->state)) {
+    dbmSay(stderr, TEXT`[ERROR] could not back the state up: ${driver->state->db->error}\n`);
+    return -1;
+  }
+
+  json_t names, bool ready = loaded(driver);
+
+  if (!ready)
+    return -1;
+
+  if (names.count() > 0 && !takeLock(driver, &names)) {
+    names.release();
+    giveLock(driver);
+    return -1;
+  }
+
+  defer names.release();
+  defer giveLock(driver);
+
+  dbmStateForgetSchema(driver->state);
+
+  /* oldest first, as they were built */
+  for (int i = 0; i < names.count(); ++i) {
+
+    const char *name = names[i].name;
+    const dbm_migration_t *migration = named(name);
+    char why[512] = "";
+
+    if (!inScope(name))
+      continue;
+
+    if (migration == NULL || !dbmLoaded(migration)) {
+      dbmSay(stderr, TEXT`[ERROR] ${shown(name)} was run, and this program does not have it\n`);
+      return -1;
+    }
+
+    if (migration->migrate == NULL) {
+      dbmSay(stdout, TEXT`[WARN] skipping ${shown(name)}, v1 migrations do not keep a schema\n`);
+      continue;
+    }
+
+    dbmSay(stdout, TEXT`[INFO] Fixing the state of ${shown(name)}\n`);
+
+    if (dbmFixV2(driver, driver->state, name, migration->migrate, why,
+                 sizeof why)) {
+      dbmSay(stderr, TEXT`[ERROR] ${shown(name)}: ${why}\n`);
+      return -1;
+    }
+  }
+
+  dbmSay(stdout, TEXT`[INFO] Done\n`);
+  return 0;
+}
+
 int dbmCheck(driver_t *driver) {
 
   size_t total;

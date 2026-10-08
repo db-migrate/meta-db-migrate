@@ -44,6 +44,7 @@ typedef struct {
   bool noTransactions;
   bool checkOnly;
   bool help;
+  bool backupState;
   bool version;
   const char *table;
 
@@ -66,6 +67,8 @@ commands:
   sync name          up or down, whichever reaches name
   reset              undo everything
   check              list what would run
+  fix                rebuild node's state from the v2 migrations that ran
+                     (--backup-state keeps the old one)
   create name        a new migration in migrations/
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
@@ -122,6 +125,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->verbose = true;
     else if (strcmp(word, "--non-transactional") == 0)
       into->noTransactions = true;
+    else if (strcmp(word, "--backup-state") == 0)
+      into->backupState = true;
     else if (strcmp(word, "--check") == 0)
       into->checkOnly = true;
     else if (word in {"-h", "--help", "-?"})
@@ -465,7 +470,8 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
-  if (!(options.command in {"up", "down", "reset", "check", "sync", "db"}))
+  if (!(options.command in {"up", "down", "reset", "check", "sync", "db",
+                            "fix"}))
     return usage();
 
   if (strcmp(options.command, "db") == 0 &&
@@ -551,6 +557,8 @@ int dbmCli(int argc, char **argv) {
     answer = dbmDown(driver, downCount, options.name, options.dryRun);
   else if (strcmp(options.command, "sync") == 0)
     answer = dbmSync(driver, options.name, options.dryRun);
+  else if (strcmp(options.command, "fix") == 0)
+    answer = dbmFix(driver, options.backupState, options.dryRun);
   else if (strcmp(options.command, "reset") == 0)
     answer = dbmReset(driver, options.dryRun);
   else

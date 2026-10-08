@@ -679,3 +679,62 @@ int dbmStateSave(dbm_state_t *self, const char *key, const char *migration) {
 int dbmStateForget(dbm_state_t *self, const char *key) {
   return dbmKvDelete(self->db, self->table, key);
 }
+
+void dbmStateForgetSchema(dbm_state_t *self) {
+  yyjson_mut_doc_free(self->schema);
+  self->schema = schemaFrom("{}");
+}
+
+int dbmStateBackup(dbm_state_t *self) {
+
+  char *schema = NULL;
+  char name[300];
+  char file[320];
+
+  if (dbmKvGet(self->db, self->table, SCHEMA, &schema))
+    return -1;
+
+  if (schema == NULL)
+    return 0;
+
+  dbmWrite(name, sizeof name, TEXT`${self->table}_b_${(long)time(NULL)}`);
+  dbmWrite(file, sizeof file, TEXT`${name}.dbmigrate`);
+
+  FILE *out = fopen(file, "w");
+
+  if (out == NULL) {
+    free(schema);
+    return dbmFail(self->db, TEXT`could not write ${file}`);
+  }
+
+  /* the row as node writes it: key, value */
+  dbmSay(out, TEXT`{"key":"${SCHEMA}","value":`);
+
+  char *quoted;
+
+  /* the schema is text inside the row, so it is written as a JSON string */
+  {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *value = yyjson_mut_strcpy(doc, schema);
+
+    yyjson_mut_doc_set_root(doc, value);
+    quoted = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+  }
+
+  fputs(quoted != NULL ? quoted : "\"\"", out);
+  fputs("}", out);
+  fclose(out);
+  free(quoted);
+  free(schema);
+
+  dbmSay(stdout, TEXT`[INFO] [state] Created a backup of ${self->table} by writing to file ${file}\n`);
+
+  if (self->db->renameTable(self->db, self->table, name) ||
+      dbmKvCreate(self->db, self->table) ||
+      dbmKvInsert(self->db, self->table, SCHEMA, "{}"))
+    return -1;
+
+  dbmSay(stdout, TEXT`[INFO] [state] Created a backup of ${self->table} by renaming table to ${name}\n`);
+  return 0;
+}

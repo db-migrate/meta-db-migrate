@@ -229,6 +229,13 @@ for driver in $drivers; do
     "$(sql "select body from notes")"
   expect "and what only $driver does" "$(ownWanted)" "$(own)"
 
+  # fix: a v2 migration's lost state rebuilt from the migration itself
+  sql "delete from migrations_state where $(keyColumn) = '20261008120500-v2-kennels'" >/dev/null
+  sql "update migrations_state set value = '{}' where $(keyColumn) = '__dbmigrate_schema__'" >/dev/null
+  "$app" fix -e "$driver" >/dev/null 2>&1
+  expect "fix rebuilds a v2 migration's state" "1 1" \
+    "$(sql "select count(*) from migrations_state where $(keyColumn) = '20261008120500-v2-kennels'") $(sql "select count(*) from migrations_state where $(keyColumn) = '__dbmigrate_schema__' and value like '%v2_kennels%'")"
+
   # a scope is a directory of its own, and only `up:billing` runs it
   "$app" up:billing -e "$driver" >/dev/null 2>&1
   expect "up:scope runs the scope, recorded with its name" \

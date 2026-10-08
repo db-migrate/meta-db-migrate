@@ -61,6 +61,9 @@ struct schema_t {
   /** Undoing: learn, but record nothing. */
   bool unlearn;
 
+  /** `fix`: learn and record, but send nothing - the schema is there already. */
+  bool fixing;
+
   /** A dry run writes no state; the SQL is printed by the driver. */
   bool dry;
 
@@ -711,6 +714,10 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
   if (self->failed)
     return -1;
 
+  /* node's fix chain: learned first, then the step counted and written */
+  if (self->fixing)
+    return learn(self, action, step) || travel(self) ? -1 : 0;
+
   if (travel(self) || learn(self, action, step) || save(self))
     return -1;
 
@@ -1165,6 +1172,47 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state, const char *name,
 
   yyjson_mut_doc_free(db.record);
   return 0;
+}
+
+/**
+ * `fix`: a v2 migration that ran, learned again from scratch - its record
+ * rebuilt and the schema with it, nothing sent, because what it built is
+ * there. node appends the new steps to the record it finds; this starts the
+ * record over, which is what rebuilding it means.
+ */
+int dbmFixV2(driver_t *driver, dbm_state_t *state, const char *name,
+             dbm_v2_t migrate, char *why, size_t room) {
+
+  schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
+                 .dry = driver->dryRun, .fixing = true};
+
+  if (!db.dry) {
+
+    char *stored = dbmStateBegin(state, db.key);
+
+    if (stored == NULL) {
+      dbmWrite(why, room, TEXT`could not begin the state of ${name}: ${state->db->error}`);
+      return -1;
+    }
+
+    free(stored);
+  }
+
+  db.record = recordFrom(NULL);
+
+  int answer = migrate(&db);
+
+  if (answer != 0 && !db.failed)
+    fail(&db, TEXT`the migration answered non-zero without saying why`);
+
+  if (!db.failed && !db.dry && dbmStateProgress(state, -1, 1))
+    fail(&db, TEXT`${state->db->error}`);
+
+  if (db.failed)
+    dbmWrite(why, room, TEXT`${db.error}`);
+
+  yyjson_mut_doc_free(db.record);
+  return db.failed ? -1 : 0;
 }
 
 /** The end of a v2 migration that ran: the lock row says so. */

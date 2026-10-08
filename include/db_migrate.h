@@ -356,6 +356,9 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
 int dbmReset(driver_t *driver, bool dryRun);
 int dbmSync(driver_t *driver, const char *destination, bool dryRun);
 
+/** node's `fix`: the state rebuilt from the v2 migrations that ran. */
+int dbmFix(driver_t *driver, bool backup, bool dryRun);
+
 /**
  * The scope the commands work in: "" or NULL for migrations/ itself, a
  * directory under it otherwise - what `up:billing` names.
