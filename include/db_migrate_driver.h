@@ -148,6 +148,12 @@ struct driver_t {
 
   int (*insert)(driver_t *self, const char *table, json_t row);
 
+  /* -------------------------------------------------------- databases */
+
+  /** `db:create` and `db:drop`, on a connection that names no database. */
+  int (*createDatabase)(driver_t *self, const char *name, bool ifNotExists);
+  int (*dropDatabase)(driver_t *self, const char *name, bool ifExists);
+
   /* ------------------------------------------------------- bookkeeping */
 
   int (*createMigrationsTable)(driver_t *self);
@@ -221,6 +227,8 @@ int dbmBaseAddForeignKey(driver_t *self, const char *table,
 int dbmBaseRemoveForeignKey(driver_t *self, const char *table,
                             const char *name);
 int dbmBaseInsert(driver_t *self, const char *table, json_t row);
+int dbmBaseCreateDatabase(driver_t *self, const char *name, bool ifNotExists);
+int dbmBaseDropDatabase(driver_t *self, const char *name, bool ifExists);
 
 int dbmBaseCreateMigrationsTable(driver_t *self);
 int dbmBaseLoadedMigrations(driver_t *self, json_t *names);

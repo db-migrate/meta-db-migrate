@@ -185,6 +185,25 @@ static int liteChangeColumn(driver_t *self, const char *table,
   return dbmFail(self, TEXT`SQLite cannot change a column in place - ${table}.${column} would have to be rebuilt, which is a migration of its own: create the new table, copy the rows, drop the old one, rename`);
 }
 
+/** A SQLite database is a file, made when it is first opened. */
+static int liteCreateDatabase(driver_t *self, const char *name,
+                              bool ifNotExists) {
+  (void)self;
+  (void)name;
+  (void)ifNotExists;
+  return 0;
+}
+
+/**
+ * Refused rather than done: dropping one would be deleting a file, and a
+ * migration tool that deletes files by a name on the command line is one
+ * typo from deleting the wrong one.
+ */
+static int liteDropDatabase(driver_t *self, const char *name, bool ifExists) {
+  (void)ifExists;
+  return dbmFail(self, TEXT`a SQLite database is a file - delete ${name} yourself if that is what you mean`);
+}
+
 /* ------------------------------------------------------------------ */
 /* opening one                                                        */
 /* ------------------------------------------------------------------ */
@@ -234,6 +253,8 @@ static driver_t *liteOpen(json_t config, char *why, size_t room) {
   self->columnDef = liteColumnDef;
   self->columnConstraint = liteColumnConstraint;
   self->changeColumn = liteChangeColumn;
+  self->createDatabase = liteCreateDatabase;
+  self->dropDatabase = liteDropDatabase;
 
   /* a key that is declared and not enforced is a comment */
   liteRunSql(self, "PRAGMA foreign_keys = ON");

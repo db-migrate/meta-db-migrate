@@ -228,6 +228,32 @@ int dbmPgChangeColumn(driver_t *self, const char *table, const char *column,
   return dbmSend(self, &sql);
 }
 
+/**
+ * PostgreSQL has no CREATE DATABASE IF NOT EXISTS, so it is asked first.
+ * CockroachDB has it, and keeps the generic version.
+ */
+static int pgCreateDatabase(driver_t *self, const char *name, bool ifNotExists) {
+
+  if (ifNotExists && !self->dryRun) {
+
+    json_t found = {0};
+    sql_t query = SQL`SELECT 1 FROM pg_database WHERE datname = ${name}`;
+    defer query.release();
+
+    if (dbmQuery(self, &query, &found))
+      return -1;
+
+    int there = found.count();
+
+    found.release();
+
+    if (there > 0)
+      return 0;
+  }
+
+  return dbmBaseCreateDatabase(self, name, false);
+}
+
 /* ------------------------------------------------------------------ */
 /* what only PostgreSQL has                                           */
 /* ------------------------------------------------------------------ */
@@ -434,7 +460,18 @@ driver_t *dbmPgConnect(json_t config, char *why, size_t room, const char *name,
     putSetting(&settings, "port", port);
     putSetting(&settings, "user", config.user);
     putSetting(&settings, "password", config.password);
-    putSetting(&settings, "dbname", config.database);
+    /**
+     * No database is how `db:create` asks to be connected: to the one every
+     * server has, from which another can be made. libpq's own default - a
+     * database named after the user - is there on a developer's machine and
+     * nowhere else.
+     */
+    const char *database = config.database;
+
+    if (database[0] == '\0')
+      database = strcmp(name, "cockroachdb") == 0 ? "defaultdb" : "postgres";
+
+    putSetting(&settings, "dbname", database);
 
     /* node reads it as `ssl.sslmode`; a plain `sslmode` is accepted too */
     const char *sslmode = config.sslmode;
@@ -483,6 +520,9 @@ driver_t *dbmPgConnect(json_t config, char *why, size_t room, const char *name,
   self->mapDataType = dbmPgMapDataType;
   self->columnDef = dbmPgColumnDef;
   self->changeColumn = dbmPgChangeColumn;
+
+  if (strcmp(name, "cockroachdb") != 0)
+    self->createDatabase = pgCreateDatabase;
 
   /* the notices about implicit indexes are noise on every CREATE TABLE */
   pgRunSql(self, "SET client_min_messages TO WARNING");

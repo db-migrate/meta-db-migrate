@@ -954,6 +954,32 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row) {
 }
 
 /* ------------------------------------------------------------------ */
+/* databases                                                          */
+/* ------------------------------------------------------------------ */
+
+int dbmBaseCreateDatabase(driver_t *self, const char *name, bool ifNotExists) {
+
+  dbm_text_t sql = {0};
+  defer sql.release();
+
+  sql.put(ifNotExists ? "CREATE DATABASE IF NOT EXISTS " : "CREATE DATABASE ");
+  self->quoteName(self, &sql, name);
+
+  return dbmSend(self, &sql);
+}
+
+int dbmBaseDropDatabase(driver_t *self, const char *name, bool ifExists) {
+
+  dbm_text_t sql = {0};
+  defer sql.release();
+
+  sql.put(ifExists ? "DROP DATABASE IF EXISTS " : "DROP DATABASE ");
+  self->quoteName(self, &sql, name);
+
+  return dbmSend(self, &sql);
+}
+
+/* ------------------------------------------------------------------ */
 /* bookkeeping                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -1074,6 +1100,8 @@ driver_t *dbmDriverNew(const char *name, size_t size) {
   self->addForeignKey = dbmBaseAddForeignKey;
   self->removeForeignKey = dbmBaseRemoveForeignKey;
   self->insert = dbmBaseInsert;
+  self->createDatabase = dbmBaseCreateDatabase;
+  self->dropDatabase = dbmBaseDropDatabase;
 
   self->createMigrationsTable = dbmBaseCreateMigrationsTable;
   self->loadedMigrations = dbmBaseLoadedMigrations;
