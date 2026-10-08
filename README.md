@@ -99,8 +99,21 @@ command:scope      the same in migrations/<scope>/ - up:billing, create:billing
 Options as in node: `-e/--env`, `--config`, `-m/--migrations-dir`,
 `-c/--count`, `-t/--table`, `-s/--state-table`, `--lock-timeout`,
 `--lock-interval`, `--backup-state`, `--dry-run`, `--check`, `-v/--verbose`,
-`--non-transactional`, `--sql-file`, `--v2-file`, `--template`, `-h`, `-i`. A
-destination can be abbreviated: `up 20261008` runs everything up to that day.
+`--non-transactional`, `--sql-file`, `--v2-file`, `--template`,
+`--ignore-on-init`, `--log-level`, `-h`, `-i`. A destination can be
+abbreviated: `up 20261008` runs everything up to that day.
+
+- **`--ignore-on-init`** is for taking over a database that already has what
+  the migrations make. `create --sql-file --ignore-on-init` writes
+  `-- db-migrate: ignore-on-init` as the first line of the up. Such an up
+  is recorded without being run when `up --ignore-on-init` is given. A
+  migration in code checks `db->ignoreOnInit` itself, which the code
+  template created with the flag already does.
+- **`--log-level info|warn|error|sql`** works as in node: it selects which
+  `[INFO]`, `[WARN]`, `[ERROR]` lines and statements are printed (`-v`, and a
+  dry run).
+- **A dry run** reads which migrations have run and prints what would
+  actually happen.
 
 While it migrates, a process holds node's migration lock: the
 `__dbmigrate_state__` row in `migrations_state`, renewed every third of
@@ -229,6 +242,7 @@ individual slots in it (`src/drivers/pg_driver.h`).
 ./build.sh                    # libdbmigrate.a, a driver library each, meta-migrate
 test/run.sh                   # against all four databases
 test/plugins.sh               # yaml, plugins/, the ssh tunnel (own sshd)
+test/options.sh               # --ignore-on-init, --log-level, dry runs
 test/compat.sh                # node db-migrate and this on the same database
 ```
 
@@ -247,5 +261,4 @@ databases (`test/database.json`) are started by the commands at the top of
   templates), scopes, db:create/db:drop, node's options, development launcher
 - v2 migrations, node's state and lock, `fix`, in node's format
 - plugins: YAML, ssh tunnel, config loaders, tunnels and templates of your own
-- Missing: seeds (not working in node either at the moment),
-  `ignore-on-init`, MongoDB
+- Missing: seeds (not working in node either at the moment), MongoDB
