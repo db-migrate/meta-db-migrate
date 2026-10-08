@@ -199,32 +199,61 @@ const char *migrator_t__dialect(migrator_t *self) {
 static dbm_migration_t[] migrations;
 
 /**
- * `/path/to/migrations/20261008120000-add-pets.c` is recorded as
- * `/20261008120000-add-pets`, which is what node db-migrate writes into the
- * same table - so a database it migrated is one this can carry on.
+ * The name a migration is recorded under, as node db-migrate records it:
+ *
+ *   .../migrations/20261008120000-add-pets.c          /20261008120000-add-pets
+ *   .../migrations/billing/20261008120000-add-tax.c   billing/20261008120000-add-tax
+ *   .../migrations/sqls/20261008120000-x-up.sql       /20261008120000-x
+ *
+ * A scope is a directory under migrations/, and its migrations carry it in
+ * front of their name instead of the slash - so a database migrated by node
+ * can be carried on here, scopes and all. What decides is the path after the
+ * last `migrations/`, which is why the launcher and build-app.sh keep that
+ * part of the path when they lower a migration somewhere else.
  */
 static bool nameOf(const char *file, char *into, size_t room) {
 
-  const char *base = strrchr(file, '/');
-  size_t length;
+  const char *relative = NULL;
 
-  base = base != NULL ? base + 1 : file;
-  length = strlen(base);
+  for (const char *at = strstr(file, "migrations/"); at != NULL;
+       at = strstr(at + 1, "migrations/"))
+    if (at == file || at[-1] == '/')
+      relative = at + strlen("migrations/");
 
-  /* a migration in code, or one in SQL named by its up file */
-  if (length > 2 && strcmp(base + length - 2, ".c") == 0)
-    length -= 2;
-  else if (length > 7 && strcmp(base + length - 7, "-up.sql") == 0)
-    length -= 7;
+  if (relative == NULL) {
+    const char *base = strrchr(file, '/');
+    relative = base != NULL ? base + 1 : file;
+  }
 
-  if (length + 2 > room) {
+  char path[512];
+  size_t length = strlen(relative);
+
+  if (length >= sizeof path) {
     dbmSay(stderr, TEXT`db-migrate: the name of ${file} is too long to record\n`);
     return false;
   }
 
-  into[0] = '/';
-  memcpy(into + 1, base, length);
-  into[length + 1] = '\0';
+  memcpy(path, relative, length + 1);
+
+  /* a migration in code, or one in SQL named by its up file */
+  if (length > 2 && strcmp(path + length - 2, ".c") == 0)
+    path[length - 2] = '\0';
+  else if (length > 7 && strcmp(path + length - 7, "-up.sql") == 0)
+    path[length - 7] = '\0';
+
+  /* SQL lives in sqls/ beside the migrations it belongs with */
+  char *sqls = strstr(path, "sqls/");
+
+  if (sqls != NULL && (sqls == path || sqls[-1] == '/'))
+    memmove(sqls, sqls + 5, strlen(sqls + 5) + 1);
+
+  bool scoped = strchr(path, '/') != NULL;
+
+  if (dbmWrite(into, room, TEXT`${scoped ? "" : "/"}${path}`) >= room) {
+    dbmSay(stderr, TEXT`db-migrate: the name of ${file} is too long to record\n`);
+    return false;
+  }
+
   return true;
 }
 
@@ -259,13 +288,13 @@ void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
   migrations.push(entry);
 }
 
-void dbmRegisterLazily(const char *file, dbm_load_t load) {
+void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
 
   dbm_migration_t entry;
 
   memset(&entry, 0, sizeof entry);
 
-  if (!nameOf(file, entry.name, sizeof entry.name))
+  if (!nameOf(as, entry.name, sizeof entry.name))
     return;
 
   /* compiled into this program already: nothing to load */
@@ -283,7 +312,7 @@ bool dbmLoaded(const dbm_migration_t *migration) {
       migration->down != NULL || migration->upSql != NULL)
     return true;
 
-  if (!migration->load(migration->file))
+  if (!migration->load(migration->file, migration->name))
     return false;
 
   /* its DBM_MIGRATION filled this very entry in, if the name agreed */
@@ -301,14 +330,13 @@ static int byName(const void *a, const void *b) {
                 ((const dbm_migration_t *)b)->name);
 }
 
-void dbmRegisterSql(const char *file, const char *up, const char *down) {
+/** SQL for the migration of this name, which is added if it is not there yet. */
+static void registerSqlAs(const char *name, const char *up, const char *down) {
 
   dbm_migration_t entry;
 
   memset(&entry, 0, sizeof entry);
-
-  if (!nameOf(file, entry.name, sizeof entry.name))
-    return;
+  dbmWrite(entry.name, sizeof entry.name, TEXT`${name}`);
 
   dbm_migration_t *known = migrationNamed(entry.name);
 
@@ -324,6 +352,14 @@ void dbmRegisterSql(const char *file, const char *up, const char *down) {
   free(known->downSql);
   known->upSql = up != NULL ? strdup(up) : NULL;
   known->downSql = down != NULL ? strdup(down) : NULL;
+}
+
+void dbmRegisterSql(const char *file, const char *up, const char *down) {
+
+  char name[256];
+
+  if (nameOf(file, name, sizeof name))
+    registerSqlAs(name, up, down);
 }
 
 /** A whole file, or NULL. The caller frees it. */
@@ -348,7 +384,7 @@ static char *slurp(const char *path) {
   return text;
 }
 
-bool dbmLoadSqlFiles(const char *upFile) {
+bool dbmLoadSqlFiles(const char *upFile, const char *name) {
 
   char downFile[1100];
   size_t length = strlen(upFile);
@@ -371,7 +407,7 @@ bool dbmLoadSqlFiles(const char *upFile) {
     return false;
   }
 
-  dbmRegisterSql(upFile, up, down);
+  registerSqlAs(name, up, down);
   free(up);
   free(down);
   return true;

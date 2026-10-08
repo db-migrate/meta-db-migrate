@@ -37,6 +37,31 @@ static json_t, bool loaded(driver_t *driver) {
   return names, true;
 }
 
+/**
+ * The scope the walker works in - "" for migrations/ itself, `billing` for
+ * migrations/billing/ - as `up:billing` names it. Every command sees only
+ * the migrations and the records of its own scope, the way node does it.
+ */
+static const char *scope = "";
+
+void dbmUseScope(const char *name) {
+  scope = name != NULL ? name : "";
+}
+
+/** Whether a recorded name belongs to the scope: what is before its last slash. */
+static bool inScope(const char *name) {
+
+  const char *slash = strrchr(name, '/');
+  size_t length = slash != NULL ? (size_t)(slash - name) : 0;
+
+  return strlen(scope) == length && strncmp(name, scope, length) == 0;
+}
+
+/** A name as a person reads it: the file, with its scope if it has one. */
+static const char *shown(const char *name) {
+  return name[0] == '/' ? name + 1 : name;
+}
+
 static bool hasRun(json_t names, const char *name) {
 
   for (int i = 0; i < names.count(); ++i)
@@ -89,10 +114,10 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   const char *way = direction == UP ? "up" : "down";
 
   dbmSay(stdout, TEXT`[INFO] ${direction == UP ? "Processing migration"
-                                           : "Undoing migration"} ${migration->name + 1}\n`);
+                                           : "Undoing migration"} ${shown(migration->name)}\n`);
 
   if (body == NULL && sql == NULL) {
-    dbmSay(stderr, TEXT`[ERROR] ${migration->name + 1} has no ${way}\n`);
+    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)} has no ${way}\n`);
     return -1;
   }
 
@@ -131,7 +156,7 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   }
 
   if (db.failed) {
-    dbmSay(stderr, TEXT`[ERROR] ${migration->name + 1}: ${db.error}\n`);
+    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${db.error}\n`);
 
     if (!driver->noTransactions && driver->abortMigration(driver))
       dbmSay(stderr, TEXT`[ERROR] and the rollback failed too: ${driver->error}\n`);
@@ -140,7 +165,7 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   }
 
   if (!driver->noTransactions && driver->endMigration(driver)) {
-    dbmSay(stderr, TEXT`[ERROR] could not commit ${migration->name + 1}: ${driver->error}\n`);
+    dbmSay(stderr, TEXT`[ERROR] could not commit ${shown(migration->name)}: ${driver->error}\n`);
     return -1;
   }
 
@@ -155,10 +180,11 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
  */
 static int towards(const char *name, const char *destination) {
 
-  size_t a = strlen(name + 1);
+  const char *file = strrchr(name, '/') != NULL ? strrchr(name, '/') + 1 : name;
+  size_t a = strlen(file);
   size_t b = strlen(destination);
 
-  return strncmp(name + 1, destination, a < b ? a : b);
+  return strncmp(file, destination, a < b ? a : b);
 }
 
 /** Up to and including the destination, at most `count`; zero is no limit. */
@@ -180,7 +206,7 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
 
   for (size_t i = 0; i < total && (count == 0 || done < count); ++i) {
 
-    if (hasRun(names, migrations[i].name))
+    if (!inScope(migrations[i].name) || hasRun(names, migrations[i].name))
       continue;
 
     /* sorted by name, so the first one past the destination ends it */
@@ -236,6 +262,9 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
 
     const char *name = names[i].name;
 
+    if (!inScope(name))
+      continue;
+
     if (destination != NULL && towards(name, destination) <= 0)
       break;
 
@@ -277,6 +306,10 @@ int dbmSync(driver_t *driver, const char *destination, bool dryRun) {
     return -1;
 
   int newest = names.count() - 1;
+
+  while (newest >= 0 && !inScope(names[newest].name))
+    --newest;
+
   bool past = newest >= 0 && towards(names[newest].name, destination) > 0;
 
   names.release();
@@ -307,10 +340,10 @@ int dbmCheck(driver_t *driver) {
 
   for (size_t i = 0; i < total; ++i) {
 
-    if (hasRun(names, migrations[i].name))
+    if (!inScope(migrations[i].name) || hasRun(names, migrations[i].name))
       continue;
 
-    dbmSay(stdout, TEXT`[INFO] Pending: ${migrations[i].name + 1}\n`);
+    dbmSay(stdout, TEXT`[INFO] Pending: ${shown(migrations[i].name)}\n`);
     ++pending;
   }
 

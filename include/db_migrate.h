@@ -173,7 +173,7 @@ typedef int (*dbm_step_t)(migrator_t *db);
  * the launcher compiles it and opens it, and its DBM_MIGRATION fills in `up`
  * and `down`. Answers whether that worked, having said why when it did not.
  */
-typedef bool (*dbm_load_t)(const char *file);
+typedef bool (*dbm_load_t)(const char *file, const char *name);
 
 typedef struct {
   /** As node db-migrate records it: the file name without `.c`, after a `/`. */
@@ -201,12 +201,16 @@ typedef struct {
 void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down);
 
 /**
- * A migration known by its file and not loaded yet. Which ones have to run is
- * the database's to say, and the walker loads exactly those - so a project
- * with three hundred migrations and a database at the two hundred and
- * ninety-ninth compiles one of them, not three hundred.
+ * A migration known by its file and not loaded yet, named by `as` - a path
+ * ending in `migrations/[scope/]<name>.c`, which may differ from `file` when
+ * the directory is called something else.
+ *
+ * Which ones have to run is the database's to say, and the walker loads
+ * exactly those - so a project with three hundred migrations and a database
+ * at the two hundred and ninety-ninth compiles one of them, not three
+ * hundred.
  */
-void dbmRegisterLazily(const char *file, dbm_load_t load);
+void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load);
 
 /** Makes sure a migration's steps are there, loading it if it was registered lazily. */
 bool dbmLoaded(const dbm_migration_t *migration);
@@ -224,7 +228,7 @@ void dbmRegisterSql(const char *file, const char *up, const char *down);
  * `-down.sql` beside it. A missing down file is a migration that cannot be
  * undone, which `down` then says rather than doing nothing.
  */
-bool dbmLoadSqlFiles(const char *upFile);
+bool dbmLoadSqlFiles(const char *upFile, const char *name);
 
 /** Every migration registered so far, sorted by name. */
 const dbm_migration_t *dbmMigrations(size_t *count);
@@ -283,6 +287,12 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
             bool dryRun);
 int dbmReset(driver_t *driver, bool dryRun);
 int dbmSync(driver_t *driver, const char *destination, bool dryRun);
+
+/**
+ * The scope the commands work in: "" or NULL for migrations/ itself, a
+ * directory under it otherwise - what `up:billing` names.
+ */
+void dbmUseScope(const char *scope);
 int dbmCheck(driver_t *driver);
 
 /**

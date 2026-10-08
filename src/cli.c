@@ -10,6 +10,8 @@
  *   app migrate reset                  all of them, backwards
  *   app migrate check                  what would run
  *   app migrate create add-pets        a new file in migrations/
+ *   app migrate up:billing             the scope in migrations/billing/
+ *   app migrate create:billing add-tax a new one in that scope
  *
  *   -e, --env NAME       which entry of database.json (NODE_ENV, then dev)
  *   --config FILE        database.json somewhere else
@@ -44,6 +46,9 @@ typedef struct {
   bool help;
   bool version;
   const char *table;
+
+  /** `up:billing` - the directory under migrations/ the command works in. */
+  const char *scope;
 } options_t;
 
 static int help(void) {
@@ -57,6 +62,8 @@ commands:
   reset              undo everything
   check              list what would run
   create name        a new migration in migrations/
+
+  command:scope      the same in migrations/scope/ - up:billing, create:billing
 
 options:
   -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
@@ -309,7 +316,15 @@ static int create(const options_t *options) {
   char path[512];
   time_t now = time(NULL);
   struct tm utc;
+  char scoped[512];
   const char *dir = options->dir != NULL ? options->dir : "migrations";
+
+  /* `create:billing add-tax` goes to migrations/billing/ */
+  if (options->scope != NULL && options->scope[0] != '\0') {
+    mkdir(dir, 0755);
+    dbmWrite(scoped, sizeof scoped, TEXT`${dir}/${options->scope}`);
+    dir = scoped;
+  }
 
   if (options->name == NULL) {
     dbmSay(stderr, TEXT`create needs a name: migrate create add-pets\n`);
@@ -361,6 +376,26 @@ int dbmCli(int argc, char **argv) {
 
   if (options.help)
     return help();
+
+  /* `up:billing` is the command `up` in the scope `billing` */
+  char command[32] = "";
+  const char *colon = options.command != NULL ? strchr(options.command, ':')
+                                              : NULL;
+
+  if (colon != NULL) {
+
+    size_t length = (size_t)(colon - options.command);
+
+    if (length >= sizeof command)
+      return usage();
+
+    memcpy(command, options.command, length);
+    command[length] = '\0';
+    options.command = command;
+    options.scope = colon + 1;
+  }
+
+  dbmUseScope(options.scope);
 
   if (options.version) {
     dbmSay(stdout, TEXT`${DBM_VERSION}\n`);
