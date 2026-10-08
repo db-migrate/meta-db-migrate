@@ -576,18 +576,18 @@ int dbmCli(int argc, char **argv) {
     return 2;
   }
 
+  /* by reference: the tunnel below may put another configuration in its place */
   json_t config = configuration(&options, why, sizeof why);
+  defer config.releaseAt();
+
   dbm_tunnel_t *tunnel = NULL;
 
   /* through the tunnel, if the connection has one, for everything below */
   if (why[0] != '\0' || !dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
-    config.release();
     return 1;
   }
 
-  /* only now: a defer takes the value it is given, and the tunnel replaced it */
-  defer config.release();
   defer dbmTunnelClose(tunnel);
 
   if (strcmp(options.command, "db") == 0)
