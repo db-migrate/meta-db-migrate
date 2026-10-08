@@ -192,7 +192,16 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
   json_t entry = file.get(env);
 
   if (entry.isNothing()) {
-    dbmWrite(why, room, TEXT`${path} has no environment called ${env}`);
+
+    /* the ones there are, so the typo is visible next to the right word */
+    dbm_text_t known = {0};
+    defer known.release();
+
+    for (int i = 0; i < file.count(); ++i)
+      if (strcmp(file.keyAt(i), "defaultEnv") != 0)
+        known.append(TEXT`${i > 0 ? ", " : ""}${file.keyAt(i)}`);
+
+    dbmWrite(why, room, TEXT`${path} has no environment called ${env} - there is ${known.text != NULL ? known.text : "none"}`);
     return meta_toJSON("null");
   }
 
