@@ -145,6 +145,24 @@ need libpq installed. Drivers and migrations register
 themselves through constructors, and nothing else references them, so a
 linker that only pulls in referenced objects would drop them.
 
+With `--static`, the client libraries go into the program too: libpq,
+OpenSSL, SQLite and libyaml, as `tools/deps.sh` builds them. The program then
+needs glibc on the host and nothing else. `test/static.sh` runs one on bare
+Debian and Fedora.
+
+- **glibc stays dynamic.** Name resolution goes through its NSS modules,
+  which belong to the host, so DNS behaves like it does for every other
+  program there.
+- **libpq is built from source, without GSSAPI and LDAP.** The
+  distributions' `libpq.a` needs Kerberos, and no distribution ships that
+  static.
+- **mysql stays dynamic.** libmysqlclient is GPL-2.0 with the FOSS exception,
+  which is not something to bake into a program that is not free software.
+
+```sh
+./build-app.sh --static . ./app pg yaml
+```
+
 Configuration works as in node db-migrate:
 
 - `database.json` with environments (`-e`, `NODE_ENV`, `defaultEnv`, `dev`)
@@ -243,6 +261,7 @@ individual slots in it (`src/drivers/pg_driver.h`).
 test/run.sh                   # against all four databases
 test/plugins.sh               # yaml, plugins/, the ssh tunnel (own sshd)
 test/options.sh               # --ignore-on-init, --log-level, dry runs
+test/static.sh                # build-app --static: glibc only, on bare Debian/Fedora
 test/compat.sh                # moving a project from node db-migrate and back
 ```
 
@@ -269,14 +288,33 @@ META_ROOT=/opt/meta ./build.sh
 `META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
-`plugins.sh` and `compat.sh`. The last one moves a project from node
+`plugins.sh`, `static.sh` and `compat.sh`. The last one moves a project from node
 db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
 
-A tag `v*` also builds a release with `tools/release.sh`: a tarball with the
-launcher, the libraries, drivers and plugins, and the headers, which unpacks
-to `/opt/meta-db-migrate`. meta itself is not in it. It comes from the image,
-as above.
+A tag `v*` also builds a release with `tools/release.sh`. The release is a
+tarball that unpacks to `/opt/meta-db-migrate` and contains:
+
+- the launcher and `bin/meta-migrate-build-app`
+- the libraries, drivers and plugins, and the headers
+- the static libraries for `--static` in `lib/deps`
+- the license, `THIRD_PARTY_NOTICES` and a CycloneDX SBOM in
+  `share/doc/meta-db-migrate`
+
+The SBOM is also attached to the GitHub release as a separate file. It lists
+what goes into a program and that no scanner can find there: meta's runtime,
+yyjson, and the static libraries, each with version, license and origin.
+
+The name of the tarball says which glibc it needs: built on Ubuntu 24.04,
+it is `glibc2.39`. A release against an older glibc will follow once meta
+learns the compiler it lowers for at run time instead of when it is built.
+meta itself is not in the tarball. It comes from the image, as above.
+
+## License
+
+MIT, see `LICENSE`. A release also carries third-party code, which
+`THIRD_PARTY_NOTICES` lists: meta's runtime is proprietary, and
+yyjson, libpq, OpenSSL, SQLite and libyaml are permissively licensed.
 
 ## Status
 
