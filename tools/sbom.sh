@@ -19,8 +19,10 @@
 # fields say what holds now; the intention is an annotation and a property
 # beside them, which bind nobody to anything and grant nothing.
 #
-# glibc is the host's and is not in it. META_IMAGE and META_DIGEST say which
-# meta it was, when the release was built from the image.
+# glibc is the host's and is listed as excluded, with GLIBC_MIN. META_IMAGE
+# and META_DIGEST say which meta it was; STAGE, the installed release, adds
+# its files by their hashes. The document itself is tools/sbom.py's, in the
+# shape of wx1-keyagent's ci/sbom.sh.
 set -eu
 
 version=$1
@@ -32,85 +34,10 @@ notices=$5
 yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' \
   "$meta/runtime/vendor/yyjson/yyjson.h")
 
-python3 - "$version" "$yyjson" "$deps/deps.json" "$sbom" \
-  "${META_IMAGE:-}" "${META_DIGEST:-}" <<'EOF'
-import json, sys, uuid, datetime
-
-version, yyjson, depsFile, out, image, digest = sys.argv[1:7]
-deps = json.load(open(depsFile))
-
-def component(name, version, license, purl, description, type="library",
-              **extra):
-    c = {"type": type, "bom-ref": purl, "name": name,
-         "version": version, "purl": purl.split("#")[0],
-         "description": description}
-    c["licenses"] = ([{"license": {"id": license}}] if license != "proprietary"
-                     else [{"license": {"name": "proprietary"}}])
-    c.update(extra)
-    return c
-
-image = image or "wxone/meta"
-fromImage = "pkg:docker/%s%s" % (image.split(":")[0],
-                                 "@" + digest if digest else "")
-planned = [{"name": "wxone:license:planned", "value": "open-source"},
-           {"name": "wxone:source", "value": image + ("@" + digest if digest else "")}]
-
-components = [
-    component("meta", digest or "unknown", "proprietary",
-              fromImage + "#compiler",
-              "the meta compiler, at /opt/meta, which the launcher and "
-              "build-app.sh lower migrations and programs with",
-              type="application", properties=planned),
-    component("meta-runtime", digest or "unknown", "proprietary",
-              fromImage + "#runtime",
-              "meta's runtime (task scheduler), statically in libdbmigrate.a "
-              "and in every program built with it", properties=planned),
-    component("yyjson", yyjson, "MIT", "pkg:github/ibireme/yyjson@" + yyjson,
-              "JSON library, statically in libdbmigrate.a"),
-]
-
-for d in deps:
-    extra = {}
-    if "sha256" in d:
-        extra["hashes"] = [{"alg": "SHA-256", "content": d["sha256"]}]
-        extra["externalReferences"] = [{"type": "distribution",
-                                        "url": d["source"]}]
-    if "built" in d:
-        extra["properties"] = [{"name": "configure", "value": d["built"]}]
-    components.append(component(
-        d["name"], d["version"], d["license"], d["purl"],
-        "statically in programs built with build-app.sh --static; "
-        + d["source"], **extra))
-
-root = "pkg:github/db-migrate/meta-db-migrate@v" + version
-bom = {
-    "bomFormat": "CycloneDX",
-    "specVersion": "1.6",
-    "serialNumber": "urn:uuid:" + str(uuid.uuid4()),
-    "version": 1,
-    "metadata": {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc)
-                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "component": {"type": "application", "bom-ref": root,
-                      "name": "meta-db-migrate", "version": version,
-                      "purl": root,
-                      "licenses": [{"license": {"id": "MIT"}}]},
-    },
-    "components": components,
-    "dependencies": [{"ref": root,
-                      "dependsOn": [c["bom-ref"] for c in components]}],
-    "annotations": [{
-        "subjects": [fromImage + "#compiler", fromImage + "#runtime"],
-        "annotator": {"organization": {"name": "wxone"}},
-        "timestamp": datetime.datetime.now(datetime.timezone.utc)
-                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "text": "meta and its runtime are meant to be released under an "
-                "open-source license in the future. Until then the "
-                "proprietary license stated here applies.",
-    }],
-}
-json.dump(bom, open(out, "w"), indent=2)
-EOF
+python3 "$(dirname "$0")/sbom.py" "$version" "$yyjson" "$deps/deps.json" \
+  "$sbom" "${META_IMAGE:-}" "${META_DIGEST:-}" "${GLIBC_MIN:-}" \
+  "$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || echo unknown)" \
+  "$meta" "${STAGE:-}"
 
 {
   cat <<EOF

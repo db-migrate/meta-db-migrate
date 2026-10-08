@@ -75,8 +75,12 @@ version=$(sed -n 's/^#define DBM_VERSION "\(.*\)"/\1/p' "$here/include/db_migrat
 doc="$prefix/share/doc/meta-db-migrate"
 mkdir -p "$doc"
 cp "$here/LICENSE" "$here/README.md" "$doc/"
-"$here/tools/sbom.sh" "$version" "$meta" "$deps" "$doc/sbom.cdx.json" \
-  "$doc/THIRD_PARTY_NOTICES" >/dev/null
+# the newest glibc symbol anything shipped asks for
+glibc=$(for f in "$prefix"/bin/meta-migrate "$prefix"/lib/*.so "$meta/meta"; do
+          objdump -T "$f"
+        done | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+GLIBC_MIN=$glibc STAGE=$prefix "$here/tools/sbom.sh" "$version" "$meta" \
+  "$deps" "$doc/sbom.cdx.json" "$doc/THIRD_PARTY_NOTICES" >/dev/null
 
 mkdir -p "$(dirname "$tarball")"
 tar -czf "$tarball" -C / "${meta#/}" "${prefix#/}"
