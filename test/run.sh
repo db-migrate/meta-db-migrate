@@ -216,6 +216,17 @@ for driver in $drivers; do
   expect "up again" "$total" "$(sql 'select count(*) from migrations')"
   expect "and the data again" 3 "$(sql 'select count(*) from pets')"
 
+  # destinations, compared on the timestamp the way node does
+  "$app" sync -e "$driver" 20261008120100 >/dev/null 2>&1
+  expect "sync down to a destination keeps it" 2 \
+    "$(sql 'select count(*) from migrations')"
+  "$app" up -e "$driver" 20261008120150 >/dev/null 2>&1
+  expect "up to a destination includes it" 3 \
+    "$(sql 'select count(*) from migrations')"
+  "$app" sync -e "$driver" 99999999 >/dev/null 2>&1
+  expect "sync up past the last runs all" "$total" \
+    "$(sql 'select count(*) from migrations')"
+
   "$app" check -e "$driver" >"$work/check.out" 2>&1
   expect "check sees nothing pending" "[INFO] 0 migration(s) to run" \
     "$(tail -1 "$work/check.out")"
