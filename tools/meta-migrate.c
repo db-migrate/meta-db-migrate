@@ -151,11 +151,25 @@ static bool refused(const char *lowered) {
  * expands it to the file it was given - so a lowered file called after its
  * hash recorded a migration under a name that changed with every edit.
  */
-static bool build(const char *source, const char *cache, char *object,
-                  size_t room) {
+/** `mkdir -p`, for a scope that is more than one directory deep. */
+static void makeDirectories(char *path) {
+
+  for (char *at = path + 1; *at != '\0'; ++at)
+    if (*at == '/') {
+      *at = '\0';
+      mkdir(path, 0755);
+      *at = '/';
+    }
+
+  mkdir(path, 0755);
+}
+
+static bool build(const char *source, const char *name, const char *cache,
+                  char *object, size_t room) {
 
   char lowered[2048];
-  char directory[1024];
+  char hashed[1024];
+  char directory[1600];
   char log[2048];
   const char *base = strrchr(source, '/');
   const char *root = setting("META_ROOT", DBM_META_ROOT);
@@ -185,8 +199,22 @@ static bool build(const char *source, const char *cache, char *object,
     return false;
   }
 
+  /**
+   * Under migrations/<scope>/ inside the hash's directory, because the C
+   * compiler expands __FILE__ to the path it was given and DBM_MIGRATION
+   * reads the scope off it. The same text in two scopes is two objects.
+   */
+  const char *slash = strrchr(name, '/');
+  char scope[512] = "";
+
+  if (name[0] != '/' && slash != NULL) {
+    memcpy(scope, name, (size_t)(slash - name));
+    scope[slash - name] = '\0';
+  }
+
+  dbmWrite(hashed, sizeof hashed, TEXT`${cache}/${zeroed(hex(hash), 16)}`);
   dbmWrite(directory, sizeof directory,
-           TEXT`${cache}/${zeroed(hex(hash), 16)}`);
+           TEXT`${hashed}/migrations${scope[0] != '\0' ? "/" : ""}${scope}`);
   dbmWrite(object, room, TEXT`${directory}/${stem}.so`);
 
   if (stat(object, &seen) == 0)
@@ -194,7 +222,7 @@ static bool build(const char *source, const char *cache, char *object,
 
   dbmSay(stdout, TEXT`[INFO] Compiling ${base}\n`);
 
-  mkdir(directory, 0755);
+  makeDirectories(directory);
   dbmWrite(lowered, sizeof lowered, TEXT`${directory}/${base}`);
   dbmWrite(log, sizeof log, TEXT`${directory}/${stem}.log`);
   dbmWrite(meta, sizeof meta, TEXT`${root}/meta`);
@@ -239,13 +267,13 @@ static bool build(const char *source, const char *cache, char *object,
  * One migration, compiled if this text has not been before, and opened. The
  * walker asks for it when the database says it has to run - not before.
  */
-static bool compileAndOpen(const char *source) {
+static bool compileAndOpen(const char *source, const char *name) {
 
   char object[2400];
 
   mkdir(".meta-migrate", 0755);
 
-  if (!build(source, ".meta-migrate", object, sizeof object))
+  if (!build(source, name, ".meta-migrate", object, sizeof object))
     return false;
 
   /**
@@ -267,6 +295,63 @@ static bool compileAndOpen(const char *source) {
  * database's to decide: the walker reads what has run, and loads exactly the
  * ones it is about to run or undo. `check` compiles nothing at all.
  */
+/**
+ * One directory of migrations - migrations/ itself, or a scope under it - by
+ * name only: the code files, and the SQL in its sqls/. `as` is what the names
+ * are read from, `migrations[/scope]`, whatever the directory is called.
+ */
+static void listOne(const char *dir, const char *as) {
+
+  char sqls[1100];
+  DIR *listing = opendir(dir);
+
+  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
+       entry != NULL; entry = readdir(listing)) {
+
+    size_t length = strlen(entry->d_name);
+    char path[1100];
+    char named[1100];
+
+    if (length < 3 || strcmp(entry->d_name + length - 2, ".c") != 0)
+      continue;
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
+    dbmWrite(named, sizeof named, TEXT`${as}/${entry->d_name}`);
+    dbmRegisterLazily(named, path, compileAndOpen);
+  }
+
+  if (listing != NULL)
+    closedir(listing);
+
+  /* and the ones written as SQL, where `create --sql-file` puts them */
+  dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
+  listing = opendir(sqls);
+
+  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
+       entry != NULL; entry = readdir(listing)) {
+
+    size_t length = strlen(entry->d_name);
+    char path[1200];
+    char named[1200];
+
+    if (length < 8 || strcmp(entry->d_name + length - 7, "-up.sql") != 0)
+      continue;
+
+    dbmWrite(path, sizeof path, TEXT`${sqls}/${entry->d_name}`);
+    dbmWrite(named, sizeof named, TEXT`${as}/sqls/${entry->d_name}`);
+    dbmRegisterLazily(named, path, dbmLoadSqlFiles);
+  }
+
+  if (listing != NULL)
+    closedir(listing);
+}
+
+/**
+ * The migrations directory and every scope in it, by name only. Which of
+ * them are compiled is the database's to decide: the walker reads what has
+ * run, and loads exactly the ones it is about to run or undo. `check`
+ * compiles nothing at all.
+ */
 static bool listAll(const char *dir) {
 
   DIR *listing = opendir(dir);
@@ -276,41 +361,25 @@ static bool listAll(const char *dir) {
     return false;
   }
 
+  listOne(dir, "migrations");
+
   for (struct dirent *entry = readdir(listing); entry != NULL;
        entry = readdir(listing)) {
 
-    size_t length = strlen(entry->d_name);
-    char path[1024];
+    char path[1100];
+    char as[1100];
+    struct stat seen;
 
-    if (length < 3 || strcmp(entry->d_name + length - 2, ".c") != 0)
+    if (entry->d_name[0] == '.' || strcmp(entry->d_name, "sqls") == 0)
       continue;
 
     dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
-    dbmRegisterLazily(path, compileAndOpen);
-  }
 
-  closedir(listing);
-
-  /* and the ones written as SQL, where `create --sql-file` puts them */
-  char sqls[1024];
-
-  dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
-  listing = opendir(sqls);
-
-  if (listing == NULL)
-    return true;
-
-  for (struct dirent *entry = readdir(listing); entry != NULL;
-       entry = readdir(listing)) {
-
-    size_t length = strlen(entry->d_name);
-    char path[1100];
-
-    if (length < 8 || strcmp(entry->d_name + length - 7, "-up.sql") != 0)
+    if (stat(path, &seen) != 0 || !S_ISDIR(seen.st_mode))
       continue;
 
-    dbmWrite(path, sizeof path, TEXT`${sqls}/${entry->d_name}`);
-    dbmRegisterLazily(path, dbmLoadSqlFiles);
+    dbmWrite(as, sizeof as, TEXT`migrations/${entry->d_name}`);
+    listOne(path, as);
   }
 
   closedir(listing);
@@ -382,31 +451,22 @@ static char *slurp(const char *path) {
  * constructor registering them - so it needs no lowering and has no runtime
  * dependency on the directory it was made from.
  */
-static int embedSql(const char *dir, const char *into) {
+/** The pairs in one sqls/ directory, named from `as` - `migrations[/scope]`. */
+static bool embedOne(FILE *out, const char *dir, const char *as) {
 
-  char sqls[1024];
-  FILE *out = fopen(into, "w");
-
-  if (out == NULL) {
-    perror(into);
-    return 1;
-  }
+  char sqls[1100];
+  DIR *listing;
+  bool ok = true;
 
   dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
-
-  fputs("/* written by meta-migrate embed-sql; do not edit */\n"
-        "#include <db_migrate.h>\n\n"
-        "__attribute__((constructor)) static void dbmEmbeddedSql(void) {\n",
-        out);
-
-  DIR *listing = opendir(sqls);
+  listing = opendir(sqls);
 
   for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
-       entry != NULL; entry = readdir(listing)) {
+       ok && entry != NULL; entry = readdir(listing)) {
 
     size_t length = strlen(entry->d_name);
-    char up[1100];
-    char down[1100];
+    char up[1200];
+    char down[1200];
 
     if (length < 8 || strcmp(entry->d_name + length - 7, "-up.sql") != 0)
       continue;
@@ -421,22 +481,21 @@ static int embedSql(const char *dir, const char *into) {
 
     if (upText == NULL) {
       dbmSay(stderr, TEXT`[ERROR] cannot read ${up}\n`);
-      fclose(out);
-      closedir(listing);
-      free(downText);
-      return 1;
+      ok = false;
+    } else {
+
+      dbmSay(out, TEXT`  dbmRegisterSql("${as}/sqls/${entry->d_name}",\n    `);
+      literal(out, upText);
+      fputs(",\n    ", out);
+
+      if (downText != NULL)
+        literal(out, downText);
+      else
+        fputs("0", out);
+
+      fputs(");\n", out);
     }
 
-    dbmSay(out, TEXT`  dbmRegisterSql("${entry->d_name}",\n    `);
-    literal(out, upText);
-    fputs(",\n    ", out);
-
-    if (downText != NULL)
-      literal(out, downText);
-    else
-      fputs("0", out);
-
-    fputs(");\n", out);
     free(upText);
     free(downText);
   }
@@ -444,9 +503,61 @@ static int embedSql(const char *dir, const char *into) {
   if (listing != NULL)
     closedir(listing);
 
+  return ok;
+}
+
+/**
+ * `meta-migrate embed-sql <migrations> <out.c>`: the SQL migrations as C, so
+ * a program that ships them is still one file. build-app.sh calls it.
+ *
+ * The output is plain C for the C compiler - string literals and one
+ * constructor registering them - so it needs no lowering and has no runtime
+ * dependency on the directory it was made from. Scopes come along, named the
+ * way the launcher names them.
+ */
+static int embedSql(const char *dir, const char *into) {
+
+  FILE *out = fopen(into, "w");
+  DIR *listing = opendir(dir);
+  bool ok;
+
+  if (out == NULL) {
+    perror(into);
+    return 1;
+  }
+
+  fputs("/* written by meta-migrate embed-sql; do not edit */\n"
+        "#include <db_migrate.h>\n\n"
+        "__attribute__((constructor)) static void dbmEmbeddedSql(void) {\n",
+        out);
+
+  ok = embedOne(out, dir, "migrations");
+
+  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
+       ok && entry != NULL; entry = readdir(listing)) {
+
+    char path[1100];
+    char as[1100];
+    struct stat seen;
+
+    if (entry->d_name[0] == '.' || strcmp(entry->d_name, "sqls") == 0)
+      continue;
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
+
+    if (stat(path, &seen) != 0 || !S_ISDIR(seen.st_mode))
+      continue;
+
+    dbmWrite(as, sizeof as, TEXT`migrations/${entry->d_name}`);
+    ok = embedOne(out, path, as);
+  }
+
+  if (listing != NULL)
+    closedir(listing);
+
   fputs("}\n", out);
   fclose(out);
-  return 0;
+  return ok ? 0 : 1;
 }
 
 int main(int argc, char **argv) {

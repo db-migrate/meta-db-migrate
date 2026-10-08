@@ -32,13 +32,13 @@ mkdir -p "$work"
 
 objects=""
 
-for source in "$app"/*.c "$app"/migrations/*.c; do
-  [ -f "$source" ] || continue
+# one source, lowered to $2 and compiled beside it
+build() {
+  source=$1
+  lowered=$2
 
-  name=$(basename "$source" .c)
-  lowered="$work/$name.c"
+  mkdir -p "$(dirname "$lowered")"
 
-  # lowered under the name it was written as, so __FILE__ is the migration's
   if ! "$root/meta" -s -emit "$lowered" -I "$here/include" "$source" \
       >"$lowered.log" 2>&1; then
     echo "lowering $source failed:" >&2
@@ -53,18 +53,29 @@ for source in "$app"/*.c "$app"/migrations/*.c; do
   fi
 
   $cc $flags -I "$here/include" -I "$root/runtime/include" \
-      -c "$lowered" -o "$work/$name.o"
-  objects="$objects $work/$name.o"
+      -c "$lowered" -o "${lowered%.c}.o"
+  objects="$objects ${lowered%.c}.o"
+}
+
+for source in "$app"/*.c; do
+  [ -f "$source" ] || continue
+  build "$source" "$work/app/$(basename "$source")"
+done
+
+# a migration is lowered under migrations/[scope/]<its own name>, because the
+# C compiler expands __FILE__ to the path it is given and DBM_MIGRATION reads
+# the name - and the scope - off it
+for source in "$app"/migrations/*.c "$app"/migrations/*/*.c; do
+  [ -f "$source" ] || continue
+  build "$source" "$work/${source#"$app"/}"
 done
 
 # migrations written as SQL go in as C string literals, so the program still
 # needs nothing beside it
-if [ -d "$app/migrations/sqls" ]; then
-  "$here/build/meta-migrate" embed-sql "$app/migrations" "$work/embedded-sql.c"
-  $cc $flags -I "$here/include" -I "$root/runtime/include" \
-      -c "$work/embedded-sql.c" -o "$work/embedded-sql.o"
-  objects="$objects $work/embedded-sql.o"
-fi
+"$here/build/meta-migrate" embed-sql "$app/migrations" "$work/embedded-sql.c"
+$cc $flags -I "$here/include" -I "$root/runtime/include" \
+    -c "$work/embedded-sql.c" -o "$work/embedded-sql.o"
+objects="$objects $work/embedded-sql.o"
 
 archives=""
 libraries=""
