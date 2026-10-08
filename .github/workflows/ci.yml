@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, static]
+        suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, static, embed]
     steps:
       - uses: actions/checkout@v7
 
@@ -71,7 +71,7 @@ jobs:
       - name: test
         run: |
           case ${{ matrix.suite }} in
-            options|plugins|static) test/${{ matrix.suite }}.sh ;;
+            options|plugins|static|embed) test/${{ matrix.suite }}.sh ;;
             *) test/run.sh ${{ matrix.suite }} ;;
           esac
 
