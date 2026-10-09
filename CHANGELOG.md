@@ -1,3 +1,13 @@
+## 0.4.0 (2026-10-09)
+
+### Features
+
+* **sql:** migrations in one SQL file with `-- up` and `-- down` sections, as
+  db-migrate-plugin-sql writes them for node db-migrate 1.0 - read by the
+  launcher, embedded by build-app.sh, made by `create --sql`, refused with
+  the plugin's words when malformed. A project moves between node with the
+  plugin and this with the same files
+
 ## 0.3.0 (2026-10-09)
 
 What node db-migrate changed up to 1.0.0-beta.38 and since, followed.
