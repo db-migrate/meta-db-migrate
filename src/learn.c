@@ -87,6 +87,18 @@ struct schema_t {
   /** The step being run, as the log says it: addColumn("pets", "age"). */
   char current[600];
 
+  /**
+   * Declaring an object made outside v2 migrations - db->adopt()->...: it is
+   * learned and recorded, nothing is sent, and its undoing only forgets it
+   * (`t:2`). And a drop of an object the schema does not know, asked for
+   * with { irreversible: true }: sent, recorded as `t:3`, never undone.
+   */
+  bool adopting;
+  bool irreversible;
+
+  /** What db->adopt() answers: this schema, seen as adopting. */
+  schema_adopt_t view;
+
   bool failed;
   char error[512];
 };
@@ -208,6 +220,10 @@ static void record(schema_t *self, int type, dbm_action_t action,
   if (self->unlearn)
     return;
 
+  /* adopted: its undoing only forgets it again */
+  if (self->adopting)
+    type = 2;
+
   yyjson_mut_doc *doc = self->record;
   yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(doc), "s");
   yyjson_mut_val *entry = yyjson_mut_obj(doc);
@@ -268,26 +284,51 @@ static yyjson_mut_val *tableIn(schema_t *self, const char *table) {
                             table);
 }
 
+/**
+ * An object the schema does not know was not made by a v2 migration but by a
+ * v1 one or by hand - node's words for it say how to go on: adopt it first,
+ * or, for a drop, drop it irreversibly.
+ */
+#define DBM_IRREVERSIBLE ", or pass { irreversible: true } to drop it without being able to revert it"
+
+static int unknownTable(schema_t *self, const char *table, bool drop) {
+  return fail(self, TEXT`The table "${table}" is unknown to the schema of db-migrate, it was not created by a v2 migration. Declare it first with db.adopt.createTable("${table}", columns)${drop ? DBM_IRREVERSIBLE : ""}.`);
+}
+
+static int unknownColumn(schema_t *self, const char *table, const char *column,
+                         bool drop) {
+  return fail(self, TEXT`The column "${column}" of "${table}" is unknown to the schema of db-migrate, it was not created by a v2 migration. Declare it first with db.adopt.addColumn("${table}", "${column}", spec)${drop ? DBM_IRREVERSIBLE : ""}.`);
+}
+
+static int unknownIndex(schema_t *self, const char *table, const char *index) {
+  return fail(self, TEXT`The index "${index}" of "${table}" is unknown to the schema of db-migrate, it was not created by a v2 migration. Declare it first with db.adopt.addIndex("${table}", "${index}", columns).`);
+}
+
+static int unknownForeignKey(schema_t *self, const char *table,
+                             const char *key, bool drop) {
+  return fail(self, TEXT`The foreign key "${key}" of "${table}" is unknown to the schema of db-migrate, it was not created by a v2 migration. Declare it first with db.adopt.addForeignKey("${table}", referencedTable, "${key}", mapping)${drop ? DBM_IRREVERSIBLE : ""}.`);
+}
+
+static bool hasColumn(schema_t *self, const char *table, const char *column) {
+
+  yyjson_mut_val *spec = tableIn(self, table);
+
+  return spec != NULL && (yyjson_mut_obj_get(spec, column) != NULL ||
+                          yyjson_mut_obj_get(columnsOf(spec), column) != NULL);
+}
+
 static int needTable(schema_t *self, const char *table) {
-
-  if (tableIn(self, table) == NULL)
-    return fail(self, TEXT`There is no ${table} table in schema!`);
-
-  return 0;
+  return tableIn(self, table) == NULL ? unknownTable(self, table, false) : 0;
 }
 
 static int needColumn(schema_t *self, const char *table, const char *column) {
 
-  yyjson_mut_val *spec = tableIn(self, table);
+  if (tableIn(self, table) == NULL)
+    return unknownTable(self, table, false);
 
-  if (spec == NULL)
-    return fail(self, TEXT`There is no ${table} table in schema!`);
-
-  if (yyjson_mut_obj_get(spec, column) == NULL &&
-      yyjson_mut_obj_get(columnsOf(spec), column) == NULL)
-    return fail(self, TEXT`There is no ${column} column in schema!`);
-
-  return 0;
+  return hasColumn(self, table, column)
+             ? 0
+             : unknownColumn(self, table, column, false);
 }
 
 /** A column name from an index's list, without the quotes node's pg driver left on it. */
@@ -372,6 +413,16 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
   case ACTION_DROP_TABLE: {
 
+    /* one the schema does not know: refused, or dropped beyond undoing */
+    if (tableIn(self, t) == NULL && !self->unlearn) {
+      if (!self->irreversible)
+        return unknownTable(self, t, true);
+
+      const char *args[] = {t};
+      record(self, 3, ACTION_DROP_TABLE, args, 1, NULL);
+      return 0;
+    }
+
     const char *const parts[] = {"c", "f", "i"};
 
     for (size_t at = 0; at < countof(parts); ++at) {
@@ -423,6 +474,17 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
   }
 
   case ACTION_REMOVE_COLUMN: {
+
+    if (!hasColumn(self, t, step->name) && !self->unlearn) {
+      if (!self->irreversible)
+        return tableIn(self, t) == NULL
+                   ? unknownTable(self, t, true)
+                   : unknownColumn(self, t, step->name, true);
+
+      const char *args[] = {t, step->name};
+      record(self, 3, ACTION_REMOVE_COLUMN, args, 2, NULL);
+      return 0;
+    }
 
     if (needColumn(self, t, step->name))
       return -1;
@@ -569,7 +631,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
                                                step->name);
 
     if (index == NULL)
-      return fail(self, TEXT`There is no index ${step->name} in ${t} table!`);
+      return unknownIndex(self, t, step->name);
 
     yyjson_mut_val *was = child(mod, child(mod, kept, "i"), t);
 
@@ -605,14 +667,25 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
   case ACTION_REMOVE_FOREIGN_KEY: {
 
-    if (needTable(self, t))
-      return -1;
-
     yyjson_mut_val *key = yyjson_mut_obj_get(yyjson_mut_obj_get(f, t),
                                              step->name);
 
+    if (key == NULL && !self->unlearn) {
+      if (!self->irreversible)
+        return tableIn(self, t) == NULL
+                   ? unknownTable(self, t, true)
+                   : unknownForeignKey(self, t, step->name, true);
+
+      const char *args[] = {t, step->name};
+      record(self, 3, ACTION_REMOVE_FOREIGN_KEY, args, 2, NULL);
+      return 0;
+    }
+
+    if (needTable(self, t))
+      return -1;
+
     if (key == NULL)
-      return fail(self, TEXT`There is no foreign key ${step->name} in ${t} table!`);
+      return unknownForeignKey(self, t, step->name, false);
 
     yyjson_mut_val *was = child(mod, child(mod, kept, "f"), t);
 
@@ -791,6 +864,12 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
       mark(self, "learned", op))
     return -1;
 
+  /* adopted: it is there already, made by somebody else */
+  if (self->adopting) {
+    self->done = op;
+    return mark(self, "done", op);
+  }
+
   self->sent = false;
   self->driver->signaled = false;
 
@@ -814,8 +893,10 @@ int schema_t__createTable(schema_t *self, const char *table, json_t spec) {
 
   step.spec = copyIn(schemaDoc(self), spec);
 
-  /* node's convention: every table a v2 migration makes carries this column */
-  if (yyjson_mut_obj_get(step.spec, "__dbmigrate__flag") == NULL) {
+  /* node's convention: every table a v2 migration makes carries this column -
+     one adopted was not made by one, and has what it has */
+  if (!self->adopting &&
+      yyjson_mut_obj_get(step.spec, "__dbmigrate__flag") == NULL) {
     yyjson_mut_val *flag = yyjson_mut_obj(schemaDoc(self));
     yyjson_mut_obj_add_str(schemaDoc(self), flag, "type", "string");
     yyjson_mut_obj_add_val(schemaDoc(self), step.spec, "__dbmigrate__flag",
@@ -825,9 +906,31 @@ int schema_t__createTable(schema_t *self, const char *table, json_t spec) {
   return perform(self, ACTION_CREATE_TABLE, &step);
 }
 
+/** Whether options say { irreversible: true } - only `true` itself does. */
+static bool irreversibleIn(json_t options) {
+  return strcmp(options.irreversible.kind(), "bool") == 0 &&
+         options.irreversible.truth();
+}
+
+/** A drop, refused or irreversible for an object the schema does not know. */
+static int dropping(schema_t *self, dbm_action_t action, step_t *step,
+                    json_t options) {
+
+  self->irreversible = irreversibleIn(options);
+
+  int answer = perform(self, action, step);
+
+  self->irreversible = false;
+  return answer;
+}
+
 int schema_t__dropTable(schema_t *self, const char *table) {
+  return self->dropTableWith(table, {});
+}
+
+int schema_t__dropTableWith(schema_t *self, const char *table, json_t options) {
   step_t step = {.table = table};
-  return perform(self, ACTION_DROP_TABLE, &step);
+  return dropping(self, ACTION_DROP_TABLE, &step, options);
 }
 
 int schema_t__renameTable(schema_t *self, const char *from, const char *to) {
@@ -872,7 +975,7 @@ int schema_t__removeColumnWith(schema_t *self, const char *table,
     step.other = renamed;
   }
 
-  return perform(self, ACTION_REMOVE_COLUMN, &step);
+  return dropping(self, ACTION_REMOVE_COLUMN, &step, options);
 }
 
 int schema_t__removeColumn(schema_t *self, const char *table,
@@ -937,8 +1040,115 @@ int schema_t__addForeignKey(schema_t *self, const char *table,
 
 int schema_t__removeForeignKey(schema_t *self, const char *table,
                                const char *name) {
+  return self->removeForeignKeyWith(table, name, {});
+}
+
+int schema_t__removeForeignKeyWith(schema_t *self, const char *table,
+                                   const char *name, json_t options) {
   step_t step = {.table = table, .name = name};
-  return perform(self, ACTION_REMOVE_FOREIGN_KEY, &step);
+  return dropping(self, ACTION_REMOVE_FOREIGN_KEY, &step, options);
+}
+
+/* ------------------------------------------------------------------ */
+/* adopting what was made outside v2 migrations                       */
+/* ------------------------------------------------------------------ */
+
+schema_adopt_t *schema_t__adopt(schema_t *self) {
+  self->view.db = self;
+  return &self->view;
+}
+
+/** Adopting is for what the schema does not know yet, in node's words. */
+static int known(schema_t *self, text_t what) {
+
+  char described[600];
+
+  dbmWrite(described, sizeof described, what);
+  return fail(self, TEXT`${described} is known to the schema already, adopt is for objects created outside of v2 migrations only.`);
+}
+
+/** An instruction run as adopting: learned and recorded, not sent. */
+#define DBM_ADOPTING(db, call)                                                 \
+  ({                                                                           \
+    (db)->adopting = true;                                                     \
+    int adopted__ = (call);                                                    \
+    (db)->adopting = false;                                                    \
+    adopted__;                                                                 \
+  })
+
+int schema_adopt_t__createTable(schema_adopt_t *self, const char *table,
+                                json_t spec) {
+
+  if (self->db->failed)
+    return -1;
+
+  if (tableIn(self->db, table) != NULL)
+    return known(self->db, TEXT`createTable("${table}")`);
+
+  return DBM_ADOPTING(self->db, schema_t__createTable(self->db, table, spec));
+}
+
+int schema_adopt_t__addColumn(schema_adopt_t *self, const char *table,
+                              const char *column, json_t spec) {
+
+  if (self->db->failed)
+    return -1;
+
+  if (hasColumn(self->db, table, column))
+    return known(self->db, TEXT`addColumn("${table}", "${column}")`);
+
+  return DBM_ADOPTING(self->db,
+                      schema_t__addColumn(self->db, table, column, spec));
+}
+
+int schema_adopt_t__addIndex(schema_adopt_t *self, const char *table,
+                             const char *name, json_t columns) {
+
+  yyjson_mut_val *indexes = yyjson_mut_obj_get(
+      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "i"), table);
+
+  if (self->db->failed)
+    return -1;
+
+  if (yyjson_mut_obj_get(indexes, name) != NULL)
+    return known(self->db, TEXT`addIndex("${table}", "${name}")`);
+
+  return DBM_ADOPTING(self->db,
+                      schema_t__addIndex(self->db, table, name, columns));
+}
+
+int schema_adopt_t__addUniqueIndex(schema_adopt_t *self, const char *table,
+                                   const char *name, json_t columns) {
+
+  yyjson_mut_val *indexes = yyjson_mut_obj_get(
+      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "i"), table);
+
+  if (self->db->failed)
+    return -1;
+
+  if (yyjson_mut_obj_get(indexes, name) != NULL)
+    return known(self->db, TEXT`addIndex("${table}", "${name}")`);
+
+  return DBM_ADOPTING(self->db,
+                      schema_t__addUniqueIndex(self->db, table, name, columns));
+}
+
+int schema_adopt_t__addForeignKey(schema_adopt_t *self, const char *table,
+                                  const char *referenced, const char *name,
+                                  json_t mapping, json_t rules) {
+
+  yyjson_mut_val *keys = yyjson_mut_obj_get(
+      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "f"), table);
+
+  if (self->db->failed)
+    return -1;
+
+  if (yyjson_mut_obj_get(keys, name) != NULL)
+    return known(self->db, TEXT`addForeignKey("${table}", "${referenced}", "${name}")`);
+
+  return DBM_ADOPTING(self->db,
+                      schema_t__addForeignKey(self->db, table, referenced,
+                                              name, mapping, rules));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1035,13 +1245,14 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
   yyjson_mut_val *args = yyjson_mut_obj_get(entry, "c");
   int found = (int)fromspelling(enum dbmAction, named);
 
-  if (found < 0 || !(type in {0, 1}))
+  if (found < 0 || !(type in {0, 1, 2}))
     return fail(self, TEXT`Invalid state record, of type ${type}: ${named}`);
 
   dbm_action_t action = (dbm_action_t)found;
   step_t step = {.table = argument(args, 0)};
 
-  if (type == 0) {
+  /* 0 is called as it was recorded; 2, adopted, is only forgotten again */
+  if (type == 0 || type == 2) {
 
     /* called as it was recorded */
     match (action) {
@@ -1062,7 +1273,7 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
       return fail(self, TEXT`a ${named} step cannot be undone as it stands`);
     }
 
-    return undo(self, action, &step);
+    return type == 2 ? learn(self, action, &step) : undo(self, action, &step);
   }
 
   /* rebuilt from what the record kept */
@@ -1260,6 +1471,41 @@ static const char *recoveryOf(const dbm_migration_t *migration,
   return mode;
 }
 
+/**
+ * The steps of the record that cannot be undone, node's way of saying them:
+ * `step 2 dropTable("junk"), step 3 ...`, or "" when there are none.
+ */
+static void irreversibleSteps(schema_t *self, char *into, size_t room) {
+
+  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
+  dbm_text_t said = {0};
+  defer said.release();
+
+  into[0] = '\0';
+
+  for (size_t at = 0; at < yyjson_mut_arr_size(steps); ++at) {
+
+    yyjson_mut_val *entry = yyjson_mut_arr_get(steps, at);
+    yyjson_mut_val *args = yyjson_mut_obj_get(entry, "c");
+
+    if (yyjson_mut_get_int(yyjson_mut_obj_get(entry, "t")) != 3)
+      continue;
+
+    said.append(TEXT`${said.length > 0 ? ", " : ""}step ${stepOf(entry)} ${textOf(yyjson_mut_obj_get(entry, "a"))}(`);
+
+    for (size_t i = 0; i < yyjson_mut_arr_size(args); ++i) {
+      yyjson_mut_val *arg = yyjson_mut_arr_get(args, i);
+      if (yyjson_mut_is_str(arg))
+        said.append(TEXT`${i > 0 ? ", " : ""}"${yyjson_mut_get_str(arg)}"`);
+    }
+
+    said.put(")");
+  }
+
+  if (said.text != NULL)
+    dbmWrite(into, room, TEXT`${said.text}`);
+}
+
 /** Undo what is left in the record, as a rollback does, and end the run. */
 static int rollBack(schema_t *self) {
 
@@ -1364,6 +1610,23 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
     /* the steps that ran, and the failed one if its table or column is there */
     keepExecuted(&db, db.done, db.counter, !db.sent && driver->signaled);
 
+    /**
+     * One of them cannot be undone: nothing is rolled back, the run stays
+     * unfinished in the lock row, and the next one continues after the
+     * steps that ran - as node does.
+     */
+    char irreversible[600];
+
+    irreversibleSteps(&db, irreversible, sizeof irreversible);
+
+    if (irreversible[0] != '\0') {
+      save(&db);
+      dbmSay(stderr, TEXT`[ERROR] Migration "${db.key}" failed and can not be rolled back, it ran a step with { irreversible: true }. The steps executed stay, the next run continues after them.\n`);
+      why[0] = '\0';
+      yyjson_mut_doc_free(db.record);
+      return -1;
+    }
+
     if (rollBack(&db))
       dbmSay(stderr, TEXT`[ERROR] and undoing it failed too: ${db.error}\n`);
 
@@ -1467,6 +1730,18 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state,
 
   db.record = recordFrom(stored);
   free(stored);
+
+  char irreversible[600];
+
+  irreversibleSteps(&db, irreversible, sizeof irreversible);
+
+  if (irreversible[0] != '\0') {
+    if (!db.dry)
+      dbmStateProgress(state, -1, 1);
+    dbmWrite(why, room, TEXT`Migration "${db.key}" can not be reverted, it ran ${irreversible} with { irreversible: true }.`);
+    yyjson_mut_doc_free(db.record);
+    return -1;
+  }
 
   int answer = undoAll(&db);
 

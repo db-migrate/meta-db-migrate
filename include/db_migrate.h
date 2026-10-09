@@ -227,10 +227,43 @@ typedef int (*dbm_step_t)(migrator_t *db);
  */
 typedef struct schema_t schema_t;
 
+/** What db->adopt() answers: the instructions declaring objects, adopting. */
+typedef struct {
+  schema_t *db;
+} schema_adopt_t;
+
 typedef int (*dbm_v2_t)(schema_t *db);
 
 int schema_t__createTable(schema_t *self, const char *table, json_t spec);
 int schema_t__dropTable(schema_t *self, const char *table);
+
+/**
+ * With { irreversible: true }, a drop of an object the schema does not know -
+ * made by a v1 migration or by hand - is sent and recorded as one that cannot
+ * be undone: down refuses the migration, and a failure does not roll it back.
+ */
+int schema_t__dropTableWith(schema_t *self, const char *table, json_t options);
+int schema_t__removeForeignKeyWith(schema_t *self, const char *table,
+                                   const char *name, json_t options);
+
+/**
+ * Objects made outside v2 migrations, declared to the schema without sending
+ * anything - db->adopt()->createTable("legacy", {...}). Afterwards v2
+ * migrations treat them as their own; undoing the migration forgets them
+ * again and leaves them in the database. node's db.adopt.
+ */
+schema_adopt_t *schema_t__adopt(schema_t *self);
+int schema_adopt_t__createTable(schema_adopt_t *self, const char *table,
+                                json_t spec);
+int schema_adopt_t__addColumn(schema_adopt_t *self, const char *table,
+                              const char *column, json_t spec);
+int schema_adopt_t__addIndex(schema_adopt_t *self, const char *table,
+                             const char *name, json_t columns);
+int schema_adopt_t__addUniqueIndex(schema_adopt_t *self, const char *table,
+                                   const char *name, json_t columns);
+int schema_adopt_t__addForeignKey(schema_adopt_t *self, const char *table,
+                                  const char *referenced, const char *name,
+                                  json_t mapping, json_t rules);
 int schema_t__renameTable(schema_t *self, const char *from, const char *to);
 int schema_t__addColumn(schema_t *self, const char *table, const char *column,
                         json_t spec);
