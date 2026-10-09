@@ -40,6 +40,9 @@ typedef struct {
   const char *config;
   const char *dir;
   const char *name;
+
+  /** `seed down pets`: the seed after down or reset. */
+  const char *second;
   size_t count;
   bool countGiven;
   bool dryRun;
@@ -80,6 +83,9 @@ commands:
                      (--backup-state keeps the old one)
   create name        a new migration in migrations/
                      (--sql, --sql-file, --v2-file, --template NAME)
+
+  seed [name]        the seeds in seeds/ again: what they inserted removed, run
+  seed down [name]   what the seeds inserted removed (seed reset: all of them)
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
   db:create name     a database, if it is not there yet
@@ -170,6 +176,9 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       ;
     else if (strcmp(word, "--template") == 0 && hasNext)
       into->template = argv[++i];
+    /* the launcher reads it; a program has its seeds compiled in */
+    else if (strcmp(word, "--seeds-dir") == 0 && hasNext)
+      ++i;
     else if (word[0] == '-') {
       dbmSay(stderr, TEXT`unknown option ${word}\n`);
       return false;
@@ -177,6 +186,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->command = word;
     else if (into->name == NULL)
       into->name = word;
+    else if (into->second == NULL && strncmp(into->command, "seed", 4) == 0)
+      into->second = word;
     else {
       dbmSay(stderr, TEXT`one argument too many: ${word}\n`);
       return false;
@@ -898,6 +909,22 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
     answer = dbmFix(driver, options->backupState, options->dryRun);
   else if (strcmp(options->command, "reset") == 0)
     answer = dbmReset(driver, options->dryRun);
+  else if (strcmp(options->command, "seed") == 0) {
+
+    /* `seed [name]`, `seed down [name]`, `seed reset` - as node's */
+    bool undo = options->name != NULL &&
+                (options->name in {"down", "reset"});
+    char why[600] = "";
+
+    answer = dbmSeed(driver, driver->state,
+                     undo ? options->second : options->name, undo,
+                     options->dryRun, why, sizeof why);
+
+    if (answer != 0)
+      dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    else
+      dbmSay(stdout, TEXT`[INFO] Done\n`);
+  }
   else
     answer = dbmCheck(driver);
 
@@ -947,14 +974,8 @@ int dbmCli(int argc, char **argv) {
   if (strcmp(options.command, "create") == 0)
     return create(&options);
 
-  /* what node db-migrate 1.0 says to them too */
-  if (options.command in {"seed", "undo-seed", "reset-seed"}) {
-    dbmSay(stderr, TEXT`[ERROR] Seeders are not supported, as by node db-migrate 1.0.\n`);
-    return 1;
-  }
-
   if (!(options.command in {"up", "down", "reset", "check", "sync", "db",
-                            "fix"}))
+                            "fix", "seed"}))
     return usage();
 
   if (strcmp(options.command, "db") == 0 &&

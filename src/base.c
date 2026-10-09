@@ -1329,3 +1329,95 @@ driver_t *dbmDriverNew(const char *name, size_t size) {
 
   return self;
 }
+
+/* ------------------------------------------------------------------ */
+/* rows to insert, in every form node's insert takes                  */
+/* ------------------------------------------------------------------ */
+
+/** One row from column names and values, both arrays of the same length. */
+static bool rowFrom(yyjson_mut_doc *doc, yyjson_mut_val *into, json_t columns,
+                    json_t values, int from, char *why, size_t room) {
+
+  yyjson_mut_val *row = yyjson_mut_obj(doc);
+
+  for (int i = 0; i < columns.count(); ++i) {
+
+    json_t value = values.at(from + i);
+
+    if (value.node == NULL) {
+      dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+      return false;
+    }
+
+    yyjson_mut_obj_add(row, yyjson_mut_strcpy(doc, columns.at(i).text()),
+                       yyjson_val_mut_copy(doc, value.node));
+  }
+
+  yyjson_mut_arr_append(into, row);
+  return true;
+}
+
+json_t dbmRowsOf(json_t rows, json_t values, char *why, size_t room) {
+
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *list = yyjson_mut_arr(doc);
+  bool ok = true;
+
+  why[0] = '\0';
+  yyjson_mut_doc_set_root(doc, list);
+
+  if (!values.isNothing()) {
+
+    /* columns, then one row of values or an array of them */
+    bool many = values.count() > 0 && strcmp(values.at(0).kind(), "array") == 0;
+
+    if (strcmp(rows.kind(), "array") != 0 ||
+        strcmp(values.kind(), "array") != 0) {
+      dbmWrite(why, room, TEXT`insert needs the rows to insert`);
+      ok = false;
+    } else if (many) {
+      for (int i = 0; ok && i < values.count(); ++i) {
+        ok = values.at(i).count() == rows.count() &&
+             rowFrom(doc, list, rows, values.at(i), 0, why, room);
+        if (!ok && why[0] == '\0')
+          dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+      }
+    } else if (values.count() != rows.count()) {
+      dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+      ok = false;
+    } else {
+      ok = rowFrom(doc, list, rows, values, 0, why, room);
+    }
+  } else if (strcmp(rows.kind(), "object") == 0 &&
+             strcmp(rows.columns.kind(), "array") == 0) {
+
+    /* { columns, data }: the values of every row one after the other */
+    json_t columns = rows.columns;
+    json_t data = rows.data;
+    int width = columns.count();
+
+    if (width == 0 || data.count() % width != 0) {
+      dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+      ok = false;
+    }
+
+    for (int at = 0; ok && at < data.count(); at += width)
+      ok = rowFrom(doc, list, columns, data, at, why, room);
+  } else if (strcmp(rows.kind(), "object") == 0) {
+    yyjson_mut_arr_append(list, yyjson_val_mut_copy(doc, rows.node));
+  } else if (strcmp(rows.kind(), "array") == 0) {
+    for (int i = 0; ok && i < rows.count(); ++i) {
+      if (strcmp(rows.at(i).kind(), "object") != 0) {
+        dbmWrite(why, room, TEXT`insert needs the rows to insert`);
+        ok = false;
+      } else {
+        yyjson_mut_arr_append(list, yyjson_val_mut_copy(doc, rows.at(i).node));
+      }
+    }
+  } else {
+    dbmWrite(why, room, TEXT`insert needs the rows to insert`);
+    ok = false;
+  }
+
+  return meta_jsonFromMut(doc);
+}

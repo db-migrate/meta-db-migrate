@@ -403,6 +403,21 @@ void dbmStateForgetSchema(dbm_state_t *self);
 int dbmDownV2(driver_t *driver, dbm_state_t *state,
               const dbm_migration_t *migration, char *why, size_t room);
 
+/**
+ * The rows of an insert in every form node's takes - an object, an array of
+ * them, { columns, data } with the values one after the other, or column
+ * names with one row of values or an array of them - as an array of
+ * objects. With the reason in `why` when they do not add up.
+ */
+json_t dbmRowsOf(json_t rows, json_t values, char *why, size_t room);
+
+/**
+ * `seed [name]`, `seed down [name]`, `seed reset`: the seeds this program
+ * has run again, or what they inserted removed.
+ */
+int dbmSeed(driver_t *driver, dbm_state_t *state, const char *name,
+            bool undo, bool dry, char *why, size_t room);
+
 /** SHA-256 as 64 hex digits; a file's, or false when it cannot be read. */
 void dbmSha256(const void *data, size_t length, char hex[65]);
 bool dbmSha256File(const char *path, char hex[65]);

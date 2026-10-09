@@ -759,12 +759,50 @@ static bool openPlugins(void) {
   return ok;
 }
 
+/** Every seed of seeds/, compiled if it changed and opened. */
+static bool openSeeds(const char *dir) {
+
+  DIR *listing = opendir(dir);
+  struct dirent *entry;
+  bool ok = true;
+
+  if (listing == NULL)
+    return true;
+
+  mkdir(".meta-migrate", 0755);
+
+  while (ok && (entry = readdir(listing)) != NULL) {
+
+    size_t length = strlen(entry->d_name);
+    char source[1024];
+    char name[600];
+    char object[2400];
+
+    if (length < 3 || strcmp(entry->d_name + length - 2, ".c") != 0)
+      continue;
+
+    dbmWrite(source, sizeof source, TEXT`${dir}/${entry->d_name}`);
+    dbmWrite(name, sizeof name, TEXT`/${entry->d_name}`);
+
+    ok = build(source, name, "seeds", ".meta-migrate", object, sizeof object);
+
+    if (ok && dlopen(object, RTLD_NOW | RTLD_GLOBAL) == NULL) {
+      dbmSay(stderr, TEXT`[ERROR] cannot open ${object}: ${dlerror()}\n`);
+      ok = false;
+    }
+  }
+
+  closedir(listing);
+  return ok;
+}
+
 int main(int argc, char **argv) {
 
   if (argc == 4 && strcmp(argv[1], "embed-sql") == 0)
     return embedSql(argv[2], argv[3]);
 
   const char *dir = "migrations";
+  const char *seedsDir = "seeds";
   const char *command = NULL;
   bool asking = false;
 
@@ -780,6 +818,8 @@ int main(int argc, char **argv) {
 
     if ((word in {"-m", "--migrations-dir"}) && i + 1 < argc)
       dir = argv[++i];
+    else if (strcmp(word, "--seeds-dir") == 0 && i + 1 < argc)
+      seedsDir = argv[++i];
     else if ((word in {"-e", "--env", "--config", "-c", "--count", "-t",
                        "--table", "--migration-table", "-s", "--state",
                        "--state-table", "--lock-timeout", "--lock-interval",
@@ -794,6 +834,11 @@ int main(int argc, char **argv) {
   dbmDriverDirectory = driverDirectory();
 
   if (!asking && !openPlugins())
+    return 1;
+
+  /* seeds are compiled like migrations, all of them, before they run */
+  if (!asking && command != NULL && strncmp(command, "seed", 4) == 0 &&
+      !openSeeds(seedsDir))
     return 1;
 
   bool needsMigrations =

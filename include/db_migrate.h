@@ -388,6 +388,39 @@ bool dbmSqlSections(const char *text, const char *file, char **up,
 /** A loader for `dbmRegisterLazily`: one such file. */
 bool dbmLoadSqlMigration(const char *file, const char *name);
 
+/* --------------------------------------------------------------- seeds */
+
+/**
+ * A static seed - data for development and tests, run again whenever asked:
+ *
+ *   static int seed(seed_t *db) {
+ *     return db->insert("owners", [{id: 1, name: "Ann"}]);
+ *   }
+ *   DBM_SEED(seed)
+ *
+ * in seeds/<name>.c. It inserts into tables made by v2 migrations, marking
+ * every row, so running it again or `seed down` removes them first.
+ */
+typedef struct seed_t seed_t;
+typedef int (*dbm_seed_fn)(seed_t *db);
+
+void dbmRegisterSeed(const char *file, dbm_seed_fn seed);
+
+#define DBM_SEED(seed)                                                         \
+  __attribute__((constructor)) static void dbmRegisterThisSeed__(void) {     \
+    dbmRegisterSeed(__FILE__, seed);                                           \
+  }
+
+/** Rows in any of node's forms: an object, an array of them, {columns, data}. */
+int seed_t__insert(seed_t *self, const char *table, json_t rows);
+
+/** Column names, and one row of values or an array of them. */
+int seed_t__insertColumns(seed_t *self, const char *table, json_t columns,
+                          json_t values);
+
+json_t seed_t__all(seed_t *self, sql_t query);
+int seed_t__fail(seed_t *self, text_t why);
+
 /**
  * A scope's config.json, compiled in by build-app.sh for a program that has
  * no migrations directory beside it; the file wins where there is one.
