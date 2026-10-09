@@ -1,3 +1,19 @@
+## 0.5.0 (2026-10-09)
+
+### Build
+
+* **build:** meta is asked what meta knows - where its runtime is
+  (`meta -print-config`) and which libraries a source needs through meta's
+  headers (`meta -print-flags`) - instead of three tables kept by hand
+* **deps:** a `.pc` file for every library `tools/deps.sh` builds;
+  `pkg-config --static` works out what they pull in, so `build-app.sh
+  --static` needs `pkg-config` on the build host
+* **sbom:** meta's version comes from `meta --version`
+
+### ⚠ Requirements
+
+* meta `ed340ea` or newer
+
 ## 0.4.0 (2026-10-09)
 
 ### Features
