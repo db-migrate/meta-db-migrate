@@ -501,6 +501,13 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     yyjson_mut_val *columns = columnsOf(tableIn(self, t));
     yyjson_mut_val *column = yyjson_mut_obj_get(columns, step->name);
 
+    /* undone: exactly the column as it was kept, not merged into the new */
+    if (self->unlearn) {
+      yyjson_mut_obj_put(columns, yyjson_mut_strcpy(doc, step->name),
+                         yyjson_mut_val_mut_copy(doc, step->spec));
+      return 0;
+    }
+
     /* the column as it was, which node meant to keep and did not */
     put(mod, child(mod, child(mod, kept, "c"), t), step->name, column);
 
