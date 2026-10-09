@@ -217,7 +217,13 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
     return -1;
   }
 
-  if (!driver->noTransactions && driver->startMigration(driver)) {
+  /* one that says so runs bare - CREATE INDEX CONCURRENTLY cannot be inside */
+  bool transaction = !driver->noTransactions && !migration->noTransaction;
+
+  if (migration->noTransaction && driver->verbose)
+    dbmSay(stdout, TEXT`[migration] ${shown(migration->name)} runs without a transaction\n`);
+
+  if (transaction && driver->startMigration(driver)) {
     dbmSay(stderr, TEXT`[ERROR] could not start a transaction: ${driver->error}\n`);
     return -1;
   }
@@ -260,13 +266,13 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   if (db.failed) {
     dbmSayFailure(driver, shown(migration->name), NULL, db.error);
 
-    if (!driver->noTransactions && driver->abortMigration(driver))
+    if (transaction && driver->abortMigration(driver))
       dbmSay(stderr, TEXT`[ERROR] and the rollback failed too: ${driver->error}\n`);
 
     return -1;
   }
 
-  if (!driver->noTransactions && driver->endMigration(driver)) {
+  if (transaction && driver->endMigration(driver)) {
     dbmSay(stderr, TEXT`[ERROR] could not commit ${shown(migration->name)}: ${driver->error}\n`);
     return -1;
   }

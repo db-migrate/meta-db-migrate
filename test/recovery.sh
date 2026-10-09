@@ -183,6 +183,34 @@ EOF
        and tablename not like 'migrations%'")"
   expect "and the failure names the step and the statement" 2 \
     "$(grep -c 'failed at step 2 createTable("pets")\|SQL: ALTER TABLE' signal.out)"
+
+  # a v1 migration without its transaction: CREATE INDEX CONCURRENTLY cannot
+  # run inside one, which is what node's _meta.transactions: false is for
+  dir="$work/concurrently"
+  mkdir -p "$dir/migrations"
+  cp "$work/signal/database.json" "$dir/"
+  cat >"$dir/migrations/20261009150000-concurrently.c" <<'EOF'
+#include <db_migrate.h>
+static int up(migrator_t *db) {
+  db->runSql("CREATE TABLE IF NOT EXISTS tagged (id int)");
+  return db->runSql("CREATE INDEX CONCURRENTLY tagged_id ON tagged (id)");
+}
+static int down(migrator_t *db) {
+  db->runSql("DROP INDEX CONCURRENTLY tagged_id");
+  return db->runSql("DROP TABLE tagged");
+}
+DBM_MIGRATION_NO_TRANSACTION(up, down)
+EOF
+  run "$dir" up >concurrently.out 2>&1
+  expect "a migration without its transaction can create an index concurrently" 1 \
+    "$(psql -h 127.0.0.1 -p 55432 -U postgres recovery -tAq -c \
+      "select count(*) from pg_indexes where indexname = 'tagged_id'")"
+  run "$dir" down >/dev/null 2>&1
+  sed -i 's/DBM_MIGRATION_NO_TRANSACTION/DBM_MIGRATION/' \
+    "$dir/migrations/20261009150000-concurrently.c"
+  run "$dir" up >concurrently.out 2>&1
+  expect "and one with its transaction cannot" 1 \
+    "$(grep -c 'cannot run inside a transaction block' concurrently.out)"
 else
   echo "skip     PostgreSQL on 55432 is not there"
 fi

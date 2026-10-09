@@ -292,6 +292,17 @@ void dbmRegister(const char *file, dbm_step_t up, dbm_step_t down) {
   migrations.push(entry);
 }
 
+void dbmRegisterWithoutTransaction(const char *file, dbm_step_t up,
+                                   dbm_step_t down) {
+
+  char name[256];
+
+  dbmRegister(file, up, down);
+
+  if (nameOf(file, name, sizeof name) && migrationNamed(name) != NULL)
+    migrationNamed(name)->noTransaction = true;
+}
+
 void dbmRegisterV2Recovering(const char *file, dbm_v2_t migrate,
                              const char *recovery) {
 

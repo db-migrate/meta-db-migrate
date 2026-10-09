@@ -292,6 +292,13 @@ typedef struct {
   dbm_v2_t migrate;
 
   /**
+   * A v1 migration that runs without the transaction around it - node's
+   * `_meta.transactions: false`, for what cannot run inside one, such as
+   * PostgreSQL's CREATE INDEX CONCURRENTLY. Its record is written on its own.
+   */
+  bool noTransaction;
+
+  /**
    * What a v2 migration that a previous run left unfinished does next -
    * node's `_meta.recovery`: "skip" (NULL) leaves the steps that ran and
    * carries on after them, "rollback" undoes them and runs it again.
@@ -357,6 +364,15 @@ void dbmForgetMigrations(void);
 #define DBM_MIGRATION(up, down)                                                \
   __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
     dbmRegister(__FILE__, up, down);                                           \
+  }
+
+void dbmRegisterWithoutTransaction(const char *file, dbm_step_t up,
+                                   dbm_step_t down);
+
+/** A v1 migration without the transaction around it. */
+#define DBM_MIGRATION_NO_TRANSACTION(up, down)                                 \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterWithoutTransaction(__FILE__, up, down);                         \
   }
 
 void dbmRegisterV2(const char *file, dbm_v2_t migrate);
