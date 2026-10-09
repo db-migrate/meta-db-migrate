@@ -87,7 +87,13 @@ started, its undoing recorded (`learned`), sent to the database (`done`).
   not skipped blind. This also works across the two tools: node can resume
   a run this one left, and the other way round.
 
-Migrations can also be plain SQL, as node's `create --sql-file` creates them:
+Migrations can also be one SQL file with an up and a down section, as
+db-migrate-plugin-sql writes them for node db-migrate 1.0
+(`create --sql`): `migrations/<stamp>-<name>.sql` with a line `-- up`, its
+SQL, and optionally a line `-- down` and its SQL. The same file works with
+node and the plugin and with this, without a plugin.
+
+Or plain SQL in two files, as node's `create --sql-file` creates them:
 `migrations/sqls/<stamp>-<name>-up.sql` and `-down.sql`. No code file is
 needed next to them. Text containing only comments (the placeholder) does
 nothing.
@@ -101,7 +107,7 @@ sync name          up or down, whichever reaches name
 reset              undo everything
 check              list what would run
 fix                rebuild node's state from the v2 migrations that ran
-create name        a new migration (--sql-file, --v2-file, --template NAME)
+create name        a new migration (--sql, --sql-file, --v2-file, --template NAME)
 db:create name     create a database, if it is not there yet
 db:drop name       drop a database, if it is there
 command:scope      the same in migrations/<scope>/ - up:billing, create:billing
