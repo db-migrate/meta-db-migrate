@@ -556,6 +556,24 @@ driver_t *dbmPgConnect(json_t config, char *why, size_t room, const char *name,
   /* the notices about implicit indexes are noise on every CREATE TABLE */
   pgRunSql(self, "SET client_min_messages TO WARNING");
 
+  /* `schema`: where its tables are and where it makes them, as node's pg */
+  const char *schema = config.schema;
+
+  if (schema[0] != '\0') {
+
+    dbm_text_t sql = {0};
+    defer sql.release();
+
+    sql.put("SET search_path TO ");
+    self->quoteName(self, &sql, schema);
+
+    if (sql.failed || pgRunSql(self, sql.text)) {
+      dbmWrite(why, room, TEXT`could not use the schema ${schema}: ${self->error}`);
+      dbmClose(self);
+      return NULL;
+    }
+  }
+
   return self;
 }
 
