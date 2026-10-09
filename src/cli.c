@@ -699,6 +699,212 @@ static void disconnected(driver_t *driver, driver_t *stateDriver) {
   dbmClose(driver);
 }
 
+/**
+ * The scopes `all` runs in: the top level first, then every scope this
+ * program has migrations of, in name order - `a`, `a/nested`, `b` - as
+ * node walks the folders.
+ */
+static size_t scopesOf(const char **into, size_t room) {
+
+  size_t count = 0;
+  size_t total;
+  const dbm_migration_t *migrations = dbmMigrations(&total);
+
+  into[count++] = "";
+
+  for (size_t i = 0; i < total && count < room; ++i) {
+
+    static char names[256][256];
+    const char *name = migrations[i].name;
+    const char *slash = strrchr(name, '/');
+
+    if (slash == NULL || slash == name)
+      continue;
+
+    char scope[256];
+    size_t length = (size_t)(slash - name);
+
+    if (length >= sizeof scope)
+      continue;
+
+    memcpy(scope, name, length);
+    scope[length] = '\0';
+
+    bool seen = false;
+
+    for (size_t at = 1; at < count && !seen; ++at)
+      seen = strcmp(into[at], scope) == 0;
+
+    if (!seen) {
+      memcpy(names[count], scope, length + 1);
+      into[count] = names[count];
+      ++count;
+    }
+  }
+
+  /* migrations are sorted by name, so their scopes are too - but `a/x`
+     sorts after `a/nested/y`'s scope only by luck; sort to be sure */
+  for (size_t a = 2; a < count; ++a)
+    for (size_t b = a; b > 1 && strcmp(into[b - 1], into[b]) > 0; --b) {
+      const char *swap = into[b];
+      into[b] = into[b - 1];
+      into[b - 1] = swap;
+    }
+
+  return count;
+}
+
+/** Whether a configuration says anything but which database or schema. */
+static bool connectsOnItsOwn(json_t scope) {
+
+  for (int i = 0; i < scope.count(); ++i)
+    if (!(scope.keyAt(i) in {"database", "schema"}))
+      return true;
+
+  return false;
+}
+
+/**
+ * The connection a scope uses, node 1.1's way: `<migrations>/<scope>/config.json`
+ * (or what build-app.sh compiled in) on top of the environment's. One that
+ * says only which database or schema switches to it - for PostgreSQL a
+ * database is a schema there - one that says more connects on its own,
+ * inheriting what it does not say. Lock and state then live where it does.
+ */
+static json_t scopedConfiguration(const options_t *options, json_t config,
+                                  const char *scope, char *why, size_t room) {
+
+  char path[1024];
+  char *text = NULL;
+  const char *dir = options->dir != NULL ? options->dir : "migrations";
+
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *merged = yyjson_val_mut_copy(doc, config.node);
+
+  yyjson_mut_doc_set_root(doc, merged);
+
+  if (scope[0] != '\0') {
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${scope}/config.json`);
+    text = slurp(path);
+
+    if (text == NULL && dbmScopeConfig(scope) != NULL)
+      text = strdup(dbmScopeConfig(scope));
+  }
+
+  if (text == NULL)
+    return meta_jsonFromMut(doc);
+
+  json_t read = meta_toJSON(text);
+  free(text);
+  defer read.release();
+
+  if (read.refused != NULL || strcmp(read.kind(), "object") != 0) {
+    dbmWrite(why, room, TEXT`${path} is not a JSON object${read.refused != NULL ? ": " : ""}${read.refused != NULL ? read.refused : ""}`);
+    yyjson_mut_doc_free(doc);
+    return meta_toJSON("null");
+  }
+
+  json_t scoped = resolved(read);
+  defer scoped.release();
+
+  if (options->verbose)
+    dbmSay(stdout, TEXT`[INFO] loaded extra config for migration subfolder: "${scope}/config.json"\n`);
+
+  const char *driver = config.driver;
+  bool own = connectsOnItsOwn(scoped);
+
+  for (int i = 0; i < scoped.count(); ++i) {
+
+    const char *key = scoped.keyAt(i);
+    json_t value = scoped.get(key);
+
+    /* switching only: PostgreSQL has no databases to switch to, a schema */
+    if (!own && strcmp(key, "database") == 0 &&
+        (driver in {"pg", "postgres", "postgresql", "cockroachdb"}))
+      key = "schema";
+
+    /* SQLite switches nothing; a file of its own is a connection of its own */
+    if (!own && strcmp(driver, "sqlite3") == 0)
+      continue;
+
+    yyjson_mut_obj_remove_key(merged, key);
+    yyjson_mut_obj_add(merged, yyjson_mut_strcpy(doc, key),
+                       yyjson_val_mut_copy(doc, value.node));
+  }
+
+  return meta_jsonFromMut(doc);
+}
+
+/** One command in one scope: its connection, its tunnel, its lock. */
+static int inScope(options_t *options, json_t environment, const char *scope) {
+
+  char why[512] = "";
+
+  dbmUseScope(scope);
+
+  json_t config = scopedConfiguration(options, environment, scope, why,
+                                      sizeof why);
+  defer config.releaseAt();
+
+  dbm_tunnel_t *tunnel = NULL;
+
+  /* through the tunnel, if the connection has one, for everything below */
+  if (why[0] != '\0' || !dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    return 1;
+  }
+
+  defer dbmTunnelClose(tunnel);
+
+  dbm_options_t settings = {
+      .migrationTable = options->table,
+      .stateTable = options->stateTable,
+      .lockTimeout = options->lockTimeout,
+      .lockInterval = options->lockInterval,
+      .verbose = options->verbose,
+  };
+  driver_t *stateDriver;
+  driver_t *driver = connected(
+      config, &settings,
+      options->dryRun || strcmp(options->command, "check") == 0, &stateDriver,
+      why, sizeof why);
+
+  if (driver == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    return 1;
+  }
+
+  int answer;
+
+  driver->noTransactions = options->noTransactions;
+  driver->ignoreOnInit = options->ignoreOnInit;
+
+  /**
+   * `down` undoes one unless told otherwise - but with a destination it
+   * undoes everything after it, as node does, and a count limits that.
+   */
+  size_t downCount = options->countGiven ? options->count
+                     : options->name != NULL ? 0
+                                             : 1;
+
+  if (strcmp(options->command, "up") == 0)
+    answer = dbmUp(driver, options->count, options->name, options->dryRun);
+  else if (strcmp(options->command, "down") == 0)
+    answer = dbmDown(driver, downCount, options->name, options->dryRun);
+  else if (strcmp(options->command, "sync") == 0)
+    answer = dbmSync(driver, options->name, options->dryRun);
+  else if (strcmp(options->command, "fix") == 0)
+    answer = dbmFix(driver, options->backupState, options->dryRun);
+  else if (strcmp(options->command, "reset") == 0)
+    answer = dbmReset(driver, options->dryRun);
+  else
+    answer = dbmCheck(driver);
+
+  disconnected(driver, stateDriver);
+  return answer == 0 ? 0 : 1;
+}
+
 int dbmCli(int argc, char **argv) {
 
   options_t options = {0};
@@ -767,69 +973,50 @@ int dbmCli(int argc, char **argv) {
   json_t config = configuration(&options, why, sizeof why);
   defer config.releaseAt();
 
-  dbm_tunnel_t *tunnel = NULL;
-
-  /* through the tunnel, if the connection has one, for everything below */
-  if (why[0] != '\0' || !dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
+  if (why[0] != '\0') {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
     return 1;
   }
-
-  defer dbmTunnelClose(tunnel);
-
-  if (strcmp(options.command, "db") == 0)
-    return database(&options, config);
-
-  dbm_options_t settings = {
-      .migrationTable = options.table,
-      .stateTable = options.stateTable,
-      .lockTimeout = options.lockTimeout,
-      .lockInterval = options.lockInterval,
-      .verbose = options.verbose,
-  };
-  driver_t *stateDriver;
-  driver_t *driver = connected(
-      config, &settings,
-      options.dryRun || strcmp(options.command, "check") == 0, &stateDriver,
-      why, sizeof why);
-
-  if (driver == NULL) {
-    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
-    return 1;
-  }
-
-  int answer;
-
-  driver->noTransactions = options.noTransactions;
-  driver->ignoreOnInit = options.ignoreOnInit;
 
   /* `up --check` is node's way of asking `check` */
   if (options.checkOnly && options.command in {"up", "sync"})
     options.command = "check";
 
-  /**
-   * `down` undoes one unless told otherwise - but with a destination it
-   * undoes everything after it, as node does, and a count limits that.
-   */
-  size_t downCount = options.countGiven ? options.count
-                     : options.name != NULL ? 0
-                                            : 1;
+  if (strcmp(options.command, "db") == 0) {
 
-  if (strcmp(options.command, "up") == 0)
-    answer = dbmUp(driver, options.count, options.name, options.dryRun);
-  else if (strcmp(options.command, "down") == 0)
-    answer = dbmDown(driver, downCount, options.name, options.dryRun);
-  else if (strcmp(options.command, "sync") == 0)
-    answer = dbmSync(driver, options.name, options.dryRun);
-  else if (strcmp(options.command, "fix") == 0)
-    answer = dbmFix(driver, options.backupState, options.dryRun);
-  else if (strcmp(options.command, "reset") == 0)
-    answer = dbmReset(driver, options.dryRun);
-  else
-    answer = dbmCheck(driver);
+    dbm_tunnel_t *tunnel = NULL;
 
-  disconnected(driver, stateDriver);
-  return answer == 0 ? 0 : 1;
+    if (!dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
+      dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+      return 1;
+    }
+
+    int answer = database(&options, config);
+
+    dbmTunnelClose(tunnel);
+    return answer;
+  }
+
+  /* `all`: the top level, then every scope, each on its own connection */
+  if (options.scope != NULL && strcmp(options.scope, "all") == 0) {
+
+    const char *scopes[256];
+    size_t count = scopesOf(scopes, countof(scopes));
+
+    for (size_t at = 0; at < count; ++at) {
+
+      dbmSay(stdout, TEXT`[INFO] Enter scope "${scopes[at][0] != '\0' ? scopes[at] : "/"}"\n`);
+
+      if (inScope(&options, config, scopes[at]) != 0)
+        return 1;
+    }
+
+    return 0;
+  }
+
+  return inScope(&options, config, options.scope != NULL ? options.scope : "")
+             ? 1
+             : 0;
 }
 
 int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,

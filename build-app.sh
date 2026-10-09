@@ -109,8 +109,8 @@ done
 # a migration is lowered under migrations/[scope/]<its own name>, because the
 # C compiler expands __FILE__ to the path it is given and DBM_MIGRATION reads
 # the name - and the scope - off it
-for source in "$app"/migrations/*.c "$app"/migrations/*/*.c; do
-  [ -f "$source" ] || continue
+# scopes nest - migrations/a/nested/ - so every level of them
+for source in $(find "$app/migrations" -name '*.c' -not -path '*/sqls/*' 2>/dev/null | sort); do
   build "$source" "$work/${source#"$app"/}"
 done
 

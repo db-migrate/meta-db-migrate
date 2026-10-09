@@ -420,6 +420,55 @@ static void listOne(const char *dir, const char *as) {
  * run, and loads exactly the ones it is about to run or undo. `check`
  * compiles nothing at all.
  */
+/** Every scope under `dir`, depth first - `a`, then `a/nested` - but sqls/. */
+static void eachScope(const char *dir, const char *as,
+                      void (*visit)(const char *, const char *, void *),
+                      void *with) {
+
+  DIR *listing = opendir(dir);
+
+  if (listing == NULL)
+    return;
+
+  /* in name order, as node walks them */
+  char names[256][256];
+  size_t count = 0;
+
+  for (struct dirent *entry = readdir(listing); entry != NULL && count < 256;
+       entry = readdir(listing)) {
+
+    char path[1100];
+    struct stat seen;
+
+    if (entry->d_name[0] == '.' || strcmp(entry->d_name, "sqls") == 0)
+      continue;
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
+
+    if (stat(path, &seen) == 0 && S_ISDIR(seen.st_mode))
+      dbmWrite(names[count++], sizeof names[0], TEXT`${entry->d_name}`);
+  }
+
+  closedir(listing);
+  qsort(names, count, sizeof names[0], (int (*)(const void *, const void *))strcmp);
+
+  for (size_t at = 0; at < count; ++at) {
+
+    char path[1100];
+    char scoped[1100];
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${names[at]}`);
+    dbmWrite(scoped, sizeof scoped, TEXT`${as}/${names[at]}`);
+    visit(path, scoped, with);
+    eachScope(path, scoped, visit, with);
+  }
+}
+
+static void listScope(const char *dir, const char *as, void *with) {
+  (void)with;
+  listOne(dir, as);
+}
+
 static bool listAll(const char *dir) {
 
   DIR *listing = opendir(dir);
@@ -429,28 +478,9 @@ static bool listAll(const char *dir) {
     return false;
   }
 
-  listOne(dir, "migrations");
-
-  for (struct dirent *entry = readdir(listing); entry != NULL;
-       entry = readdir(listing)) {
-
-    char path[1100];
-    char as[1100];
-    struct stat seen;
-
-    if (entry->d_name[0] == '.' || strcmp(entry->d_name, "sqls") == 0)
-      continue;
-
-    dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
-
-    if (stat(path, &seen) != 0 || !S_ISDIR(seen.st_mode))
-      continue;
-
-    dbmWrite(as, sizeof as, TEXT`migrations/${entry->d_name}`);
-    listOne(path, as);
-  }
-
   closedir(listing);
+  listOne(dir, "migrations");
+  eachScope(dir, "migrations", listScope, NULL);
   return true;
 }
 
@@ -636,11 +666,38 @@ static bool embedOne(FILE *out, const char *dir, const char *as) {
  * dependency on the directory it was made from. Scopes come along, named the
  * way the launcher names them.
  */
+typedef struct {
+  FILE *out;
+  bool ok;
+} embedding_t;
+
+/** A scope's migrations, and its config.json for the connection it uses. */
+static void embedScope(const char *dir, const char *as, void *with) {
+
+  embedding_t *embedding = with;
+  char config[1200];
+
+  if (!embedding->ok)
+    return;
+
+  embedding->ok = embedOne(embedding->out, dir, as);
+
+  dbmWrite(config, sizeof config, TEXT`${dir}/config.json`);
+
+  char *text = slurp(config);
+
+  if (text != NULL) {
+    /* the scope is the path after migrations/ */
+    dbmSay(embedding->out, TEXT`  dbmRegisterScopeConfig("${as + strlen("migrations/")}",\n    `);
+    literal(embedding->out, text);
+    fputs(");\n", embedding->out);
+    free(text);
+  }
+}
+
 static int embedSql(const char *dir, const char *into) {
 
   FILE *out = fopen(into, "w");
-  DIR *listing = opendir(dir);
-  bool ok;
 
   if (out == NULL) {
     perror(into);
@@ -652,33 +709,13 @@ static int embedSql(const char *dir, const char *into) {
         "__attribute__((constructor)) static void dbmEmbeddedSql(void) {\n",
         out);
 
-  ok = embedOne(out, dir, "migrations");
+  embedding_t embedding = {out, embedOne(out, dir, "migrations")};
 
-  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
-       ok && entry != NULL; entry = readdir(listing)) {
-
-    char path[1100];
-    char as[1100];
-    struct stat seen;
-
-    if (entry->d_name[0] == '.' || strcmp(entry->d_name, "sqls") == 0)
-      continue;
-
-    dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
-
-    if (stat(path, &seen) != 0 || !S_ISDIR(seen.st_mode))
-      continue;
-
-    dbmWrite(as, sizeof as, TEXT`migrations/${entry->d_name}`);
-    ok = embedOne(out, path, as);
-  }
-
-  if (listing != NULL)
-    closedir(listing);
+  eachScope(dir, "migrations", embedScope, &embedding);
 
   fputs("}\n", out);
   fclose(out);
-  return ok ? 0 : 1;
+  return embedding.ok ? 0 : 1;
 }
 
 /**

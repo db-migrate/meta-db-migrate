@@ -584,6 +584,26 @@ bool dbmLoadSqlMigration(const char *file, const char *name) {
   return true;
 }
 
+typedef struct {
+  const char *scope;
+  const char *json;
+} dbm_scope_config_t;
+
+static dbm_scope_config_t[] scopeConfigs;
+
+void dbmRegisterScopeConfig(const char *scope, const char *json) {
+  scopeConfigs.push((dbm_scope_config_t){scope, json});
+}
+
+const char *dbmScopeConfig(const char *scope) {
+
+  for (entry in scopeConfigs)
+    if (strcmp(entry->scope, scope) == 0)
+      return entry->json;
+
+  return NULL;
+}
+
 const dbm_migration_t *dbmMigrations(size_t *count) {
 
   qsort(migrations.items, migrations.count, sizeof(dbm_migration_t), byName);

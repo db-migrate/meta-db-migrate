@@ -388,6 +388,13 @@ bool dbmSqlSections(const char *text, const char *file, char **up,
 /** A loader for `dbmRegisterLazily`: one such file. */
 bool dbmLoadSqlMigration(const char *file, const char *name);
 
+/**
+ * A scope's config.json, compiled in by build-app.sh for a program that has
+ * no migrations directory beside it; the file wins where there is one.
+ */
+void dbmRegisterScopeConfig(const char *scope, const char *json);
+const char *dbmScopeConfig(const char *scope);
+
 /** Every migration registered so far, sorted by name. */
 const dbm_migration_t *dbmMigrations(size_t *count);
 
