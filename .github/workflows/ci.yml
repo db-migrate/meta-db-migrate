@@ -111,6 +111,7 @@ jobs:
         run: |
           (cd build/node-db-migrate && npm install --omit=dev --no-audit --no-fund)
           (cd build/pg && npm install --omit=dev --no-audit --no-fund)
+          npm install --prefix build/plugins --no-audit --no-fund db-migrate-plugin-sql
 
       - name: database
         run: |
@@ -125,6 +126,7 @@ jobs:
         env:
           NODE_DB_MIGRATE: ${{ github.workspace }}/build/node-db-migrate
           NODE_PG: ${{ github.workspace }}/build/pg
+          NODE_PLUGIN_SQL: ${{ github.workspace }}/build/plugins/node_modules/db-migrate-plugin-sql
         run: test/compat.sh
 
   release:

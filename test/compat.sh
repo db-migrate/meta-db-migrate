@@ -21,6 +21,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 top="$here/.."
 node_dbm=${NODE_DB_MIGRATE:-$top/../node-db-migrate}
 node_pg=${NODE_PG:-$top/../pg}
+node_plugin_sql=${NODE_PLUGIN_SQL:-$top/../plugin-sql}
 work="$top/build/compat"
 meta="$top/build/meta-migrate"
 failed=0
@@ -229,6 +230,42 @@ echo "-- node db-migrate dies, this carries on"
 interrupted node meta
 echo "-- this dies, node db-migrate carries on"
 interrupted meta node
+
+# ---------------------------- SQL migrations of db-migrate-plugin-sql
+
+# one file, `-- up` and `-- down`: node reads it with the plugin, this
+# without one - the same file in both projects
+rm -f "$work"/node/migrations/* "$work"/meta/migrations/*
+mkdir -p "$work/node/node_modules"
+ln -sfn "$node_plugin_sql" "$work/node/node_modules/db-migrate-plugin-sql"
+cat >"$work/node/package.json" <<'EOF'
+{"name": "compat", "version": "1.0.0",
+ "dependencies": {"db-migrate-plugin-sql": "*"}}
+EOF
+cat >"$work/node/migrations/20261009160000-users.sql" <<'EOF'
+-- what the plugin's README shows
+-- up
+CREATE TABLE users (id int PRIMARY KEY, name text);
+CREATE TABLE roles (id int PRIMARY KEY);
+
+-- down
+DROP TABLE roles;
+DROP TABLE users;
+EOF
+cp "$work/node/migrations/20261009160000-users.sql" "$work/meta/migrations/"
+
+for pair in node:meta meta:node; do
+  old=${pair%%:*}
+  new=${pair##*:}
+
+  fresh
+  "run_$old" up >/dev/null 2>&1
+  expect "$old runs a plugin-sql migration" \
+    "migrations,migrations_state,roles,users /20261009160000-users" \
+    "$(tables) $(ran)"
+  "run_$new" down >/dev/null 2>&1
+  expect "and $new undoes it from the same file" "$empty" "$(tables)"
+done
 
 echo "$failed failed"
 [ "$failed" -eq 0 ]
