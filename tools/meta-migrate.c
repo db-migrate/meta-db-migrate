@@ -201,25 +201,6 @@ static void show(const char *log) {
   fclose(file);
 }
 
-/** Whether the lowered file says meta could not write part of it back. */
-static bool refused(const char *lowered) {
-
-  FILE *file = fopen(lowered, "r");
-  char line[512];
-  bool found = false;
-
-  if (file == NULL)
-    return true;
-
-  while (!found && fgets(line, sizeof line, file) != NULL)
-    if (strncmp(line, "#error meta cannot write back", 29) == 0) {
-      fputs(line, stderr);
-      found = true;
-    }
-
-  fclose(file);
-  return found;
-}
 
 /**
  * The shared object for one migration, compiled if this text has not been
@@ -313,7 +294,8 @@ static bool build(const char *source, const char *name, const char *under,
   char *lower[] = {meta, "-s", "-emit", lowered, "-I", (char *)include,
                    (char *)source, NULL};
 
-  if (!run(lower, log) || refused(lowered)) {
+  /* meta fails a construct it cannot write back, with its reason in the log */
+  if (!run(lower, log)) {
     dbmSay(stderr, TEXT`[ERROR] meta could not lower ${base}:\n`);
     show(log);
     return false;

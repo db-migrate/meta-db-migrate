@@ -18,7 +18,7 @@
 # is GPL-2.0 with the FOSS exception, and inside a program that is not free
 # software that is not ours to hand out; mysql is linked dynamically.
 #
-# <dir>/lib          the archives
+# <dir>/lib          the archives, and lib/pkgconfig a .pc for each
 # <dir>/include      libpq's headers
 # <dir>/deps.json    each one: name, version, license, where it came from -
 #                    what tools/sbom.sh and tools/notices.sh read
@@ -128,4 +128,38 @@ $(sed '$ s/,$//' "$work/packaged.json")
 EOF
 
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$out/deps.json"
+
+# -------------------------------------------------- how to link them
+
+# A .pc for each, so build.sh and build-app.sh ask pkg-config --static
+# for what a library pulls in - libpq OpenSSL, SQLite libm - rather than
+# knowing it. Relative to where they lie, so an unpacked release has them
+# right too.
+mkdir -p "$out/lib/pkgconfig"
+
+pc() {
+  # $1 name, $2 version, $3 -l flag, $4 Libs.private, $5 Requires.private
+  cat >"$out/lib/pkgconfig/$1.pc" <<EOF
+prefix=\${pcfiledir}/../..
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+
+Name: $1
+Description: $1, built by meta-db-migrate's tools/deps.sh
+Version: $2
+Libs: -L\${libdir} $3
+Libs.private: $4
+Requires.private: $5
+Cflags: -I\${includedir}
+EOF
+}
+
+openssl=$(dpkg-query -W -f '${Version}' libssl-dev | sed 's/-.*//')
+yaml=$(dpkg-query -W -f '${Version}' libyaml-dev | sed 's/-.*//')
+
+pc libpq "$pg_version" -lpq "-lpgcommon -lpgport" "libssl libcrypto"
+pc libssl "$openssl" -lssl "" "libcrypto"
+pc libcrypto "$openssl" -lcrypto "-ldl -lpthread" ""
+pc sqlite3 "$sqlite_version" -lsqlite3 "-lm -ldl -lpthread" ""
+pc yaml-0.1 "$yaml" -lyaml "" ""
 echo "deps in $out: $(ls "$out/lib" | tr '\n' ' ')"

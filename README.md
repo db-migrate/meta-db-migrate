@@ -193,6 +193,9 @@ Debian and Fedora.
 ./build-app.sh --static . ./app pg yaml
 ```
 
+The libraries come with a `.pc` file each, and pkg-config works out what
+they pull in, so the build host needs `pkg-config` as well as a C compiler.
+
 Configuration works as in node db-migrate:
 
 - `database.json` with environments (`-e`, `NODE_ENV`, `defaultEnv`, `dev`)
@@ -329,6 +332,14 @@ down, reset, a migration that fails partway, a dry run, and the launcher.
 `test/migrations/common` is shared, and each driver has its own folder. The
 databases (`test/database.json`) are started by the commands at the top of
 `test/run.sh`. SQLite only needs a file.
+
+## Building
+
+`build.sh` asks meta what meta knows: where its runtime is
+(`meta -print-config`) and which libraries a source needs through meta's own
+headers (`meta -print-flags`, as pkg-config names). The only thing it knows
+itself is that the yaml plugin needs libyaml, because that plugin includes
+`yaml.h` directly. This needs meta `ed340ea` or newer (`meta --version`).
 
 ## CI and releases
 

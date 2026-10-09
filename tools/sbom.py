@@ -3,7 +3,7 @@ The CycloneDX document for tools/sbom.sh, in the shape wx1-keyagent's
 ci/sbom.sh writes, so that one can be nested in the other.
 
   sbom.py <version> <yyjson> <deps.json> <out> <image> <digest> <glibc>
-          <commit> <meta dir> <stage>
+          <meta version> <commit> <meta dir> <stage>
 
 <stage>, the installed release, adds the files shipped by their hashes; empty
 leaves them out.
@@ -16,8 +16,8 @@ import sys
 import uuid
 from urllib.parse import quote
 
-(version, yyjson, depsFile, out, image, digest, glibc, commit, metaDir,
- stage) = sys.argv[1:11]
+(version, yyjson, depsFile, out, image, digest, glibc, metaVersion, commit,
+ metaDir, stage) = sys.argv[1:12]
 deps = json.load(open(depsFile))
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -58,12 +58,13 @@ fromMeta = {
 }
 
 components = [
-    library("meta", digest or "unknown", "proprietary (wx-one)",
+    library("meta", metaVersion or digest or "unknown", "proprietary (wx-one)",
             "pkg:generic/meta",
             "the meta compiler, shipped at /opt/meta; the launcher and "
             "build-app.sh lower migrations and programs with it",
             type="application", **fromMeta),
-    library("meta-runtime", digest or "unknown", "proprietary (wx-one)",
+    library("meta-runtime", metaVersion or digest or "unknown",
+            "proprietary (wx-one)",
             "pkg:generic/meta-runtime",
             "runtime of the meta compiler (libmeta_runtime.a and its headers), "
             "in libdbmigrate.a and so in every program built with it",

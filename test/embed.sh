@@ -107,22 +107,25 @@ int main(int argc, char **argv) {
 }
 EOF
 
+config=$("$root/meta" -print-config)
+runtimeInclude=$(echo "$config" | sed -n 's/^runtime-include=//p')
+
 # lowered as build-app.sh does: a migration under migrations/, for __FILE__
 objects=""
 for source in module.c migrations/*.c; do
   lowered="lowered/$source"
   "$root/meta" -s -emit "$lowered" -I "$top/include" "$source" \
     >"$lowered.log" 2>&1 || { cat "$lowered.log"; exit 1; }
-  $cc -std=gnu11 -fPIC -g -I "$top/include" -I "$root/runtime/include" \
+  $cc -std=gnu11 -fPIC -g -I "$top/include" -I "$runtimeInclude" \
     -c "$lowered" -o "${lowered%.c}.o" || exit 1
   objects="$objects ${lowered%.c}.o"
 done
 
-# meta's runtime as the program brings it, apart from libdbmigrate-core.a
-if [ -f "$root/lib/libmeta_runtime.a" ]; then
-  runtime="$root/lib/libmeta_runtime.a"
-else
-  ar rcs libmeta_runtime.a "$top/build/obj/meta_tasks.o" "$top/build/obj/yyjson.o"
+# meta's runtime as the program brings it, apart from libdbmigrate-core.a:
+# the archive a published meta has, or one made of a checkout's objects
+runtime=$(echo "$config" | sed -n 's/^runtime-archive=//p')
+if [ -z "$runtime" ]; then
+  ar rcs libmeta_runtime.a "$top"/build/obj/runtime/*.o
   runtime="$work/libmeta_runtime.a"
 fi
 

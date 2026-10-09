@@ -8,21 +8,24 @@
 #   libdbmigrate-<d>.a      one driver or plugin, for a program that links it
 #   libdbmigrate-<d>.so     the same, for the launcher to load
 #   meta-migrate            the development launcher
+#   drivers.txt             what each driver needs, for build-app.sh
 #
 # The drivers are whatever is in src/drivers/: pg, cockroachdb (which is pg
 # and its own differences), mysql, sqlite3. The plugins are in src/plugins/:
 # yaml. Both are built the same way, because both are linked the same way.
 #
 # Every source is meta, so each one is lowered to C first and the C compiler
-# only ever sees the lowered files. The runtime is the two objects meta's own
-# programs link: the task scheduler and yyjson.
+# only ever sees the lowered files. What meta knows, meta is asked: where its
+# runtime is (`meta -print-config`) and which libraries a source needs
+# through meta's own headers (`meta -print-flags`). The headers' paths then
+# come from pkg-config.
 #
 #   ./build.sh
 #   META_ROOT=/path/to/metalanguage ./build.sh
 #   DBM_BUILD_DIR=/elsewhere ./build.sh       instead of build/
 #   DBM_STATIC_DEPS=build/deps ./build.sh     the drivers' shared objects
-#       carry libpq, OpenSSL, SQLite and libyaml (tools/deps.sh) inside them,
-#       so the launcher needs none of them installed - a release does this
+#       carry the libraries tools/deps.sh built inside them, so the launcher
+#       needs none of them installed - a release does this
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -34,22 +37,73 @@ flags="-std=gnu11 -Wall -Wextra -Werror -g ${CFLAGS:-}"
 
 mkdir -p "$out/lowered" "$out/obj"
 
-# where the system keeps the client libraries' headers: Debian and Ubuntu put
-# libpq-fe.h under /usr/include/postgresql, which no compiler looks in
+# one line of `meta -print-config` or `-print-flags`: `key=value`
+answer() {
+  sed -n "s/^$1=//p"
+}
+
+config=$("$meta" -print-config)
+runtimeInclude=$(echo "$config" | answer runtime-include)
+
+# ------------------------------------------- what the sources need
+
+# The libraries a source needs through meta's headers, as pkg-config names.
+# Asked before the headers' paths are known, so what meta cannot find yet
+# is said on stderr and not wanted here.
+packagesOf() {
+  "$meta" -print-flags -I "$here/include" -I "$here/src/drivers" "$1" \
+    2>/dev/null | answer pkg-config
+}
+
+# What meta cannot know, because the source includes the library's header
+# itself rather than through one of meta's - until meta libraries can say so
+# in a manifest of their own.
+ownPackagesOf() {
+  case $1 in
+    yaml) echo yaml-0.1 ;;
+  esac
+}
+
+for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
+  [ -f "$source" ] || continue
+  name=$(basename "$source" .c)
+  echo "$name $(packagesOf "$source") $(ownPackagesOf "$name")"
+done >"$out/packages.txt"
+
+# what each driver is made of
+objectsOf() {
+  case $1 in
+    cockroachdb) echo "$out/obj/driver-pg.o $out/obj/driver-cockroachdb.o" ;;
+    *) echo "$out/obj/driver-$1.o" ;;
+  esac
+}
+
+# a driver's: those of every object it is made of - cockroachdb is pg too
+packagesFor() {
+  for object in $(objectsOf "$1"); do
+    sed -n "s/^$(basename "$object" .o | sed 's/^driver-//') //p" "$out/packages.txt"
+  done | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+# the headers' paths: Debian and Ubuntu put libpq-fe.h under
+# /usr/include/postgresql, which no compiler looks in
+deps=${DBM_STATIC_DEPS:-}
 system=""
-for package in libpq mysqlclient libmariadb sqlite3 yaml-0.1; do
+for package in $(cut -d' ' -f2- "$out/packages.txt" | tr ' ' '\n' | sort -u); do
   system="$system $(pkg-config --cflags-only-I "$package" 2>/dev/null || true)"
 done
 
 # the headers of the libraries that will be linked in, before the system's
-deps=${DBM_STATIC_DEPS:-}
 if [ -n "$deps" ]; then
   deps=$(CDPATH= cd -- "$deps" && pwd)
   system="-I$deps/include $system"
 fi
 
+# -------------------------------------------------------------- building
+
 lower() {
-  # $1 source, $2 lowered file, the rest handed to meta
+  # $1 source, $2 lowered file, the rest handed to meta; a construct meta
+  # cannot write back fails it with its reason
   source=$1
   lowered=$2
   shift 2
@@ -61,19 +115,13 @@ lower() {
     cat "$lowered.log" >&2
     exit 1
   fi
-
-  if grep -q "^#error meta cannot write back" "$lowered"; then
-    echo "meta could not write back part of $source:" >&2
-    grep "^#error" "$lowered" >&2
-    exit 1
-  fi
 }
 
 compile() {
   # $1 lowered file, $2 object
   # src/drivers too: a lowered driver no longer sits beside pg_driver.h
   $cc $flags -fPIC -I "$here/include" -I "$here/src/drivers" \
-      -I "$root/runtime/include" $system -c "$1" -o "$2"
+      -I "$runtimeInclude" $system -c "$1" -o "$2"
 }
 
 core=""
@@ -93,60 +141,67 @@ for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
   drivers="$drivers $out/obj/driver-$name.o"
 done
 
-# the runtime, once: from its sources in a metalanguage checkout, or as the
-# objects a published meta brings in lib/libmeta_runtime.a
-if [ -f "$root/runtime/meta_tasks.c" ]; then
-  $cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} -I "$root/runtime/include" \
-      -c "$root/runtime/meta_tasks.c" -o "$out/obj/meta_tasks.o"
-  $cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} \
-      -c "$root/runtime/vendor/yyjson/yyjson.c" -o "$out/obj/yyjson.o"
-  runtime="$out/obj/meta_tasks.o $out/obj/yyjson.o"
-elif [ -f "$root/lib/libmeta_runtime.a" ]; then
-  rm -rf "$out/obj/runtime"
-  mkdir -p "$out/obj/runtime"
-  (cd "$out/obj/runtime" && ar x "$root/lib/libmeta_runtime.a")
-  runtime=$(ls "$out"/obj/runtime/*.o)
+# the runtime, once: as the archive a published meta brings, or from the
+# sources of a checkout - meta says which
+rm -rf "$out/obj/runtime"
+mkdir -p "$out/obj/runtime"
+archive=$(echo "$config" | answer runtime-archive)
+
+if [ -n "$archive" ]; then
+  (cd "$out/obj/runtime" && ar x "$archive")
 else
-  echo "$root has neither runtime/meta_tasks.c nor lib/libmeta_runtime.a" >&2
-  exit 1
+  for source in $(echo "$config" | answer runtime-sources); do
+    $cc -std=gnu11 -O2 -g -fPIC ${CFLAGS:-} -I "$runtimeInclude" \
+        -c "$source" -o "$out/obj/runtime/$(basename "$source" .c).o"
+  done
 fi
+
+runtime=$(ls "$out"/obj/runtime/*.o)
 
 rm -f "$out"/libdbmigrate*.a
 ar rcs "$out/libdbmigrate.a" $core $runtime
 ar rcs "$out/libdbmigrate-core.a" $core
 
-# what each driver is made of, and what it needs from the system
-objectsOf() {
-  case $1 in
-    cockroachdb) echo "$out/obj/driver-pg.o $out/obj/driver-cockroachdb.o" ;;
-    *) echo "$out/obj/driver-$1.o" ;;
-  esac
+# ---------------------------------------------------------------- linking
+
+# one library, linked dynamically: what pkg-config says, or the package's
+# own name where pkg-config does not know it (libpq -lpq, yaml-0.1 -lyaml)
+dynamicLibraryOf() {
+  pkg-config --libs-only-l "$1" 2>/dev/null ||
+    echo "-l$(echo "$1" | sed 's/^lib//; s/-[0-9.]*$//')"
 }
 
-librariesOf() {
-  case $1 in
-    pg|cockroachdb) echo "-lpq" ;;
-    mysql) echo "-lmysqlclient" ;;
-    sqlite3) echo "-lsqlite3" ;;
-    yaml) echo "-lyaml -lm" ;;
-  esac
+dynamicLibrariesOf() {
+  for package in $(packagesFor "$1"); do
+    dynamicLibraryOf "$package"
+  done | tr '\n' ' '
 }
 
-# what a driver's shared object carries inside it, with DBM_STATIC_DEPS -
-# hidden, so they meet nothing else the launcher loads; mysql stays dynamic,
-# for libmysqlclient's GPL
+# The libraries that go into a shared object with DBM_STATIC_DEPS: those
+# tools/deps.sh built - it writes a .pc for each - statically and hidden, so
+# they meet nothing else the launcher loads; the rest, mysql among them, as
+# they are. glibc's own stay dynamic, always.
 sharedLibrariesOf() {
-  static=""
-  case $1 in
-    pg|cockroachdb) static="-lpq -lpgcommon -lpgport -lssl -lcrypto" ;;
-    sqlite3) static="-lsqlite3" ;;
-    yaml) static="-lyaml" ;;
-  esac
 
-  if [ -n "$deps" ] && [ -n "$static" ]; then
-    echo "-L$deps/lib -Wl,--exclude-libs,ALL -Wl,-Bstatic $static -Wl,-Bdynamic -lpthread -ldl -lm"
+  static=""
+  dynamic=""
+
+  for package in $(packagesFor "$1"); do
+    if [ -n "$deps" ] && [ -f "$deps/lib/pkgconfig/$package.pc" ]; then
+      static="$static $package"
+    else
+      dynamic="$dynamic $(dynamicLibraryOf "$package")"
+    fi
+  done
+
+  if [ -n "$static" ]; then
+    linked=$(PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" \
+             pkg-config --static --libs $static)
+    glibc=$(echo "$linked" | tr ' ' '\n' | grep -xE -- '-l(pthread|dl|m|rt|c)' | tr '\n' ' ')
+    others=$(echo "$linked" | tr ' ' '\n' | grep -vxE -- '-l(pthread|dl|m|rt|c)' | tr '\n' ' ')
+    echo "-Wl,--exclude-libs,ALL -Wl,-Bstatic $others -Wl,-Bdynamic $glibc $dynamic"
   else
-    librariesOf "$1"
+    echo "$dynamic"
   fi
 }
 
@@ -162,9 +217,9 @@ for driver in $names; do
       $(sharedLibrariesOf $driver)
 done
 
-# for build-app.sh, so it does not have to know the table above
+# for build-app.sh: each driver, its pkg-config names, its libraries
 for driver in $names; do
-  echo "$driver $(librariesOf $driver)"
+  echo "$driver|$(packagesFor $driver)|$(dynamicLibrariesOf $driver)"
 done >"$out/drivers.txt"
 
 # the launcher: the core and the runtime, exported for the migrations and

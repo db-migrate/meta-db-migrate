@@ -31,11 +31,13 @@ deps=$3
 sbom=$4
 notices=$5
 
-yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' \
-  "$meta/runtime/vendor/yyjson/yyjson.h")
+# meta says which it is and where its vendored yyjson lies
+metaVersion=$("$meta/meta" --version | sed 's/^meta //')
+yyjsonHeader=$("$meta/meta" -print-config | sed -n 's/^vendored-yyjson=//p')
+yyjson=$(sed -n 's/^#define YYJSON_VERSION_STRING "\(.*\)"/\1/p' "$yyjsonHeader")
 
 python3 "$(dirname "$0")/sbom.py" "$version" "$yyjson" "$deps/deps.json" \
-  "$sbom" "${META_IMAGE:-}" "${META_DIGEST:-}" "${GLIBC_MIN:-}" \
+  "$sbom" "${META_IMAGE:-}" "${META_DIGEST:-}" "${GLIBC_MIN:-}" "$metaVersion" \
   "$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || echo unknown)" \
   "$meta" "${STAGE:-}"
 
@@ -62,7 +64,7 @@ in the future. Until then the proprietary license applies.
 
 EOF
   # the license is the header's first comment
-  sed -n '1,/\*\//p' "$meta/runtime/vendor/yyjson/yyjson.h"
+  sed -n '1,/\*\//p' "$yyjsonHeader"
 
   for license in "$deps"/licenses/*.txt; do
     name=$(basename "$license" .txt)

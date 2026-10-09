@@ -28,9 +28,9 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-static=false
+staticBuild=false
 if [ "${1:-}" = "--static" ]; then
-  static=true
+  staticBuild=true
   shift
 fi
 
@@ -63,7 +63,7 @@ else
   trap 'rm -rf "$work"' EXIT
 fi
 
-if $static && [ ! -f "$deps/deps.json" ]; then
+if $staticBuild && [ ! -f "$deps/deps.json" ]; then
   echo "--static needs the libraries tools/deps.sh builds, in $deps (DBM_DEPS)" >&2
   exit 1
 fi
@@ -73,6 +73,9 @@ mkdir -p "$work"
 
 objects=""
 
+# where this meta keeps its runtime's headers
+runtimeInclude=$("$root/meta" -print-config | sed -n 's/^runtime-include=//p')
+
 # one source, lowered to $2 and compiled beside it
 build() {
   source=$1
@@ -80,6 +83,7 @@ build() {
 
   mkdir -p "$(dirname "$lowered")"
 
+  # a construct meta cannot write back fails it, with its reason
   if ! "$root/meta" -s -emit "$lowered" -I "$include" "$source" \
       >"$lowered.log" 2>&1; then
     echo "lowering $source failed:" >&2
@@ -87,13 +91,7 @@ build() {
     exit 1
   fi
 
-  if grep -q "^#error meta cannot write back" "$lowered"; then
-    echo "meta could not write back part of $source:" >&2
-    grep "^#error" "$lowered" >&2
-    exit 1
-  fi
-
-  $cc $flags -I "$include" -I "$root/runtime/include" \
+  $cc $flags -I "$include" -I "$runtimeInclude" \
       -c "$lowered" -o "${lowered%.c}.o"
   objects="$objects ${lowered%.c}.o"
 }
@@ -119,44 +117,53 @@ done
 # migrations written as SQL go in as C string literals, so the program still
 # needs nothing beside it
 "$launcher" embed-sql "$app/migrations" "$work/embedded-sql.c"
-$cc $flags -I "$include" -I "$root/runtime/include" \
+$cc $flags -I "$include" -I "$runtimeInclude" \
     -c "$work/embedded-sql.c" -o "$work/embedded-sql.o"
 objects="$objects $work/embedded-sql.o"
 
-# what a driver needs, linked into the program
-staticOf() {
-  case $1 in
-    pg|cockroachdb) echo "-lpq -lpgcommon -lpgport -lssl -lcrypto" ;;
-    sqlite3) echo "-lsqlite3" ;;
-    yaml) echo "-lyaml" ;;
-  esac
-}
-
+# drivers.txt says, per driver: its libraries as pkg-config names, and as
+# linker flags. With --static, those tools/deps.sh built - it wrote a .pc
+# for each - go into the program; glibc's own and the rest stay dynamic.
 archives=""
 libraries=""
-linkedIn=""
+static=""
 
 for driver in $drivers; do
-  if ! grep -q "^$driver " "$lib/drivers.txt"; then
+  line=$(grep "^$driver|" "$lib/drivers.txt" || true)
+
+  if [ -z "$line" ]; then
     echo "there is no $driver driver or plugin" >&2
     exit 1
   fi
 
   archives="$archives $lib/libdbmigrate-$driver.a"
+  packages=$(echo "$line" | cut -d'|' -f2)
+  dynamic=$(echo "$line" | cut -d'|' -f3)
+  linkedIn=""
 
-  if $static && [ -n "$(staticOf "$driver")" ]; then
-    linkedIn="$linkedIn $(staticOf "$driver")"
+  for package in $packages; do
+    if $staticBuild && [ -f "$deps/lib/pkgconfig/$package.pc" ]; then
+      linkedIn="$linkedIn $package"
+    fi
+  done
+
+  # all of the driver's libraries in, or the driver as the system has it
+  if [ -n "$linkedIn" ] && [ "$(echo $linkedIn)" = "$(echo $packages)" ]; then
+    static="$static $linkedIn"
   else
-    libraries="$libraries $(grep "^$driver " "$lib/drivers.txt" | cut -d' ' -f2-)"
+    libraries="$libraries $dynamic"
   fi
 done
 
-if [ -n "$linkedIn" ]; then
-  linkedIn="-L$deps/lib -Wl,-Bstatic $linkedIn -Wl,-Bdynamic"
+if [ -n "$static" ]; then
+  flags_=$(PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" pkg-config --static --libs $static)
+  glibc=$(echo "$flags_" | tr ' ' '\n' | grep -xE -- '-l(pthread|dl|m|rt|c)' | tr '\n' ' ')
+  others=$(echo "$flags_" | tr ' ' '\n' | grep -vxE -- '-l(pthread|dl|m|rt|c)' | tr '\n' ' ')
+  libraries="-Wl,-Bstatic $others -Wl,-Bdynamic $glibc $libraries"
 fi
 
 $cc $flags -o "$output" $objects \
     -Wl,--whole-archive $archives "$lib/libdbmigrate.a" \
-    -Wl,--no-whole-archive $linkedIn $libraries -lpthread -ldl -lm
+    -Wl,--no-whole-archive $libraries -lpthread -ldl -lm
 
 echo "built $output"
