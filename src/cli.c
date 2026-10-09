@@ -229,6 +229,58 @@ static const char *driverOf(const char *url) {
  * variable they name, which is how node db-migrate keeps passwords out of the
  * file. A string entry is a URL and stays one.
  */
+/** Whether a value is `{"ENV": "NAME", ...}`. */
+static bool namesVariable(json_t value) {
+  return strcmp(value.kind(), "object") == 0 &&
+         strcmp(value.ENV.kind(), "string") == 0;
+}
+
+/**
+ * `{"ENV": "NAME", "default": value}`: the variable, or the default when it
+ * is unset or empty - node 1.8's - or what is there, null when nothing is.
+ */
+static yyjson_mut_val *fromEnv(yyjson_mut_doc *doc, json_t entry) {
+
+  const char *set = getenv(entry.ENV.text());
+  json_t fallback = entry.get("default");
+
+  if (set != NULL && set[0] != '\0')
+    return yyjson_mut_strcpy(doc, set);
+
+  if (strcmp(fallback.kind(), "nothing") != 0)
+    return yyjson_val_mut_copy(doc, fallback.node);
+
+  return set != NULL ? yyjson_mut_strcpy(doc, set) : yyjson_mut_null(doc);
+}
+
+/** A value with every `{"ENV": ...}` in it resolved, at any depth. */
+static yyjson_mut_val *walked(yyjson_mut_doc *doc, json_t value) {
+
+  if (namesVariable(value))
+    return fromEnv(doc, value);
+
+  if (strcmp(value.kind(), "object") == 0) {
+
+    yyjson_mut_val *object = yyjson_mut_obj(doc);
+
+    for (int i = 0; i < value.count(); ++i)
+      yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, value.keyAt(i)),
+                         walked(doc, value.get(value.keyAt(i))));
+    return object;
+  }
+
+  if (strcmp(value.kind(), "array") == 0) {
+
+    yyjson_mut_val *array = yyjson_mut_arr(doc);
+
+    for (int i = 0; i < value.count(); ++i)
+      yyjson_mut_arr_append(array, walked(doc, value.at(i)));
+    return array;
+  }
+
+  return yyjson_val_mut_copy(doc, value.node);
+}
+
 static json_t resolved(json_t entry) {
 
   if (strcmp(entry.kind(), "object") != 0) {
@@ -239,26 +291,27 @@ static json_t resolved(json_t entry) {
   }
 
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *object = yyjson_mut_obj(doc);
+  yyjson_mut_val *object;
 
-  for (int i = 0; i < entry.count(); ++i) {
+  /**
+   * An environment that is a URL from a variable: the URL, and the keys
+   * written beside it added to it - node 1.8 stopped dropping them.
+   */
+  if (namesVariable(entry)) {
 
-    const char *key = entry.keyAt(i);
-    json_t value = entry.get(key);
-    const char *variable = value.ENV;
+    yyjson_mut_val *url = fromEnv(doc, entry);
+    const char *said = yyjson_mut_is_str(url) ? yyjson_mut_get_str(url) : "";
 
-    if (strcmp(value.kind(), "object") == 0 && variable[0] != '\0') {
+    object = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, object, "driver", driverOf(said));
+    yyjson_mut_obj_add(object, yyjson_mut_str(doc, "url"), url);
 
-      const char *set = getenv(variable);
-
-      yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, key),
-                         set != NULL ? yyjson_mut_strcpy(doc, set)
-                                     : yyjson_mut_null(doc));
-      continue;
-    }
-
-    yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, key),
-                       yyjson_val_mut_copy(doc, value.node));
+    for (int i = 0; i < entry.count(); ++i)
+      if (!(entry.keyAt(i) in {"ENV", "default"}))
+        yyjson_mut_obj_put(object, yyjson_mut_strcpy(doc, entry.keyAt(i)),
+                           walked(doc, entry.get(entry.keyAt(i))));
+  } else {
+    object = walked(doc, entry);
   }
 
   yyjson_mut_doc_set_root(doc, object);
@@ -354,9 +407,24 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
   if (env == NULL)
     env = getenv("NODE_ENV");
 
+  /* defaultEnv, from a variable too; unset, it is dev - or development */
+  char chosen[256] = "";
+
   if (env == NULL || env[0] == '\0') {
-    const char *fallback = file.defaultEnv;
-    env = fallback[0] != '\0' ? fallback : "dev";
+
+    json_t fallback = file.defaultEnv;
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *named = walked(doc, fallback);
+
+    if (yyjson_mut_is_str(named))
+      dbmWrite(chosen, sizeof chosen, TEXT`${yyjson_mut_get_str(named)}`);
+
+    yyjson_mut_doc_free(doc);
+
+    env = chosen[0] != '\0'                         ? chosen
+          : file.get("dev").isNothing() &&
+                  !file.get("development").isNothing() ? "development"
+                                                       : "dev";
   }
 
   json_t entry = file.get(env);
@@ -369,7 +437,7 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
 
     for (int i = 0; i < file.count(); ++i)
       if (strcmp(file.keyAt(i), "defaultEnv") != 0)
-        known.append(TEXT`${i > 0 ? ", " : ""}${file.keyAt(i)}`);
+        known.append(TEXT`${known.length > 0 ? ", " : ""}${file.keyAt(i)}`);
 
     dbmWrite(why, room, TEXT`${path} has no environment called ${env} - there is ${known.text != NULL ? known.text : "none"}`);
     return meta_toJSON("null");

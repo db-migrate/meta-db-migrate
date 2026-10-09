@@ -86,6 +86,28 @@ expect "and a section twice" 1 \
   "$("$meta" up 2>&1 | grep -c 'users.sql:3: the section "up" is defined twice')"
 rm -f "$users"
 
+# ------------------------------------- defaults for environment variables
+
+mkdir -p envs/migrations
+cat >envs/database.json <<'EOF'
+{"defaultEnv": {"ENV": "DBM_TEST_ENV", "default": "lite"},
+ "lite": {"driver": "sqlite3", "filename": {"ENV": "DBM_TEST_FILE", "default": "fallback.db"}},
+ "fromurl": {"ENV": "DBM_TEST_URL", "default": "sqlite://x", "driver": "sqlite3", "filename": "url.db"}}
+EOF
+(cd envs && "$meta" check >/dev/null 2>&1 && DBM_TEST_FILE= "$meta" check >/dev/null 2>&1)
+expect "a variable unset or empty takes its default, defaultEnv too" "fallback.db" \
+  "$(cd envs && ls *.db)"
+(cd envs && DBM_TEST_FILE=set.db "$meta" check >/dev/null 2>&1)
+expect "a variable set wins" 1 "$(ls envs/set.db 2>/dev/null | wc -l)"
+(cd envs && DBM_TEST_ENV=fromurl "$meta" check >/dev/null 2>&1)
+expect "an environment from a URL keeps the keys beside it" 1 \
+  "$(ls envs/url.db 2>/dev/null | wc -l)"
+echo '{"defaultEnv": {"ENV": "DBM_TEST_NOPE"}, "development": {"driver": "sqlite3", "filename": "devel.db"}}' \
+  >envs/database.json
+(cd envs && "$meta" check >/dev/null 2>&1)
+expect "a defaultEnv that stays empty is dev, or development" 1 \
+  "$(ls envs/devel.db 2>/dev/null | wc -l)"
+
 # --------------------------------------------------------------- log-level
 
 expect "--log-level error leaves only errors" "" \
