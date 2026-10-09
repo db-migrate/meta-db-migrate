@@ -16,9 +16,10 @@
 #
 # Every source is meta, so each one is lowered to C first and the C compiler
 # only ever sees the lowered files. What meta knows, meta is asked: where its
-# runtime is (`meta -print-config`) and which libraries a source needs
-# through meta's own headers (`meta -print-flags`). The headers' paths then
-# come from pkg-config.
+# runtime is (`meta -print-config`) and which libraries a driver needs
+# (`meta -print-flags`) - through meta's own headers, or as its source names
+# them with `#pragma meta needs`. The headers' paths then come from
+# pkg-config.
 #
 #   ./build.sh
 #   META_ROOT=/path/to/metalanguage ./build.sh
@@ -47,42 +48,37 @@ runtimeInclude=$(echo "$config" | answer runtime-include)
 
 # ------------------------------------------- what the sources need
 
-# The libraries a source needs through meta's headers, as pkg-config names.
-# Asked before the headers' paths are known, so what meta cannot find yet
-# is said on stderr and not wanted here.
-packagesOf() {
-  "$meta" -print-flags -I "$here/include" -I "$here/src/drivers" "$1" \
-    2>/dev/null | answer pkg-config
-}
-
-# What meta cannot know, because the source includes the library's header
-# itself rather than through one of meta's - until meta libraries can say so
-# in a manifest of their own.
-ownPackagesOf() {
+# what each driver is made of: cockroachdb is pg and its own differences
+sourcesOf() {
   case $1 in
-    yaml) echo yaml-0.1 ;;
+    cockroachdb) echo "$here/src/drivers/pg.c $here/src/drivers/cockroachdb.c" ;;
+    yaml) echo "$here/src/plugins/yaml.c" ;;
+    *) echo "$here/src/drivers/$1.c" ;;
   esac
 }
 
-for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
-  [ -f "$source" ] || continue
-  name=$(basename "$source" .c)
-  echo "$name $(packagesOf "$source") $(ownPackagesOf "$name")"
+objectsOf() {
+  for source in $(sourcesOf "$1"); do
+    echo "$out/obj/driver-$(basename "$source" .c).o"
+  done | tr '\n' ' '
+}
+
+names=$(for source in "$here"/src/drivers/*.c "$here"/src/plugins/*.c; do
+  [ -f "$source" ] && basename "$source" .c
+done)
+
+# The libraries a driver needs, as pkg-config names: meta reads all of its
+# sources at once - the libraries behind meta's own headers, and those a
+# source names with `#pragma meta needs`. Asked before the headers' paths
+# are known, so what meta cannot find yet is said on stderr and not wanted.
+for driver in $names; do
+  echo "$driver $("$meta" -print-flags -I "$here/include" \
+                    -I "$here/src/drivers" $(sourcesOf "$driver") 2>/dev/null |
+                  answer pkg-config)"
 done >"$out/packages.txt"
 
-# what each driver is made of
-objectsOf() {
-  case $1 in
-    cockroachdb) echo "$out/obj/driver-pg.o $out/obj/driver-cockroachdb.o" ;;
-    *) echo "$out/obj/driver-$1.o" ;;
-  esac
-}
-
-# a driver's: those of every object it is made of - cockroachdb is pg too
 packagesFor() {
-  for object in $(objectsOf "$1"); do
-    sed -n "s/^$(basename "$object" .o | sed 's/^driver-//') //p" "$out/packages.txt"
-  done | tr ' ' '\n' | sort -u | tr '\n' ' '
+  sed -n "s/^$1 //p" "$out/packages.txt"
 }
 
 # the headers' paths: Debian and Ubuntu put libpq-fe.h under
@@ -207,10 +203,6 @@ sharedLibrariesOf() {
 
 # each driver twice: an archive for a program that links it, and a shared
 # object for the launcher, whose core symbols come from the launcher itself
-names=$(for object in $drivers; do
-  basename "$object" .o | sed 's/^driver-//'
-done)
-
 for driver in $names; do
   ar rcs "$out/libdbmigrate-$driver.a" $(objectsOf $driver)
   $cc $flags -shared -o "$out/libdbmigrate-$driver.so" $(objectsOf $driver) \

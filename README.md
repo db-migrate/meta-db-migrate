@@ -336,10 +336,13 @@ databases (`test/database.json`) are started by the commands at the top of
 ## Building
 
 `build.sh` asks meta what meta knows: where its runtime is
-(`meta -print-config`) and which libraries a source needs through meta's own
-headers (`meta -print-flags`, as pkg-config names). The only thing it knows
-itself is that the yaml plugin needs libyaml, because that plugin includes
-`yaml.h` directly. This needs meta `ed340ea` or newer (`meta --version`).
+(`meta -print-config`), and which libraries each driver needs
+(`meta -print-flags` over all of its sources, as pkg-config names). Those
+come from meta's own headers, or from the source itself where it includes a
+library's header directly: the yaml plugin says
+`#pragma meta needs "yaml-0.1"` beside `#include <yaml.h>`. build.sh
+itself knows none of it. This needs meta `ed6f263` or newer
+(`meta --version`).
 
 ## CI and releases
 

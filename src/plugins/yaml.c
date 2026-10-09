@@ -23,6 +23,7 @@
 #include <db_migrate_plugin.h>
 
 #include <yaml.h>
+#pragma meta needs "yaml-0.1"
 
 #include <errno.h>
 #include <math.h>
