@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /** Before a call: whether there is anything to do. */
 static bool blocked(migrator_t *self) {
@@ -235,11 +236,14 @@ static bool nameOf(const char *file, char *into, size_t room) {
 
   memcpy(path, relative, length + 1);
 
-  /* a migration in code, or one in SQL named by its up file */
+  /* a migration in code, one in SQL named by its up file, or one in SQL
+     with both its sections - db-migrate-plugin-sql's */
   if (length > 2 && strcmp(path + length - 2, ".c") == 0)
     path[length - 2] = '\0';
   else if (length > 7 && strcmp(path + length - 7, "-up.sql") == 0)
     path[length - 7] = '\0';
+  else if (length > 4 && strcmp(path + length - 4, ".sql") == 0)
+    path[length - 4] = '\0';
 
   /* SQL lives in sqls/ beside the migrations it belongs with */
   char *sqls = strstr(path, "sqls/");
@@ -432,6 +436,134 @@ bool dbmLoadSqlFiles(const char *upFile, const char *name) {
   if (up == NULL) {
     dbmSay(stderr, TEXT`[ERROR] cannot read ${upFile}\n`);
     free(down);
+    return false;
+  }
+
+  registerSqlAs(name, up, down);
+  free(up);
+  free(down);
+  return true;
+}
+
+/** A line, trimmed, as `-- up` or `-- down` - or neither, NULL. */
+static const char *sectionOf(const char *line, size_t length) {
+
+  while (length > 0 && strchr(" \t\r", *line) != NULL)
+    ++line, --length;
+
+  while (length > 0 && strchr(" \t\r", line[length - 1]) != NULL)
+    --length;
+
+  if (length < 2 || line[0] != '-' || line[1] != '-')
+    return NULL;
+
+  line += 2, length -= 2;
+
+  while (length > 0 && strchr(" \t", *line) != NULL)
+    ++line, --length;
+
+  if (length == 2 && strncasecmp(line, "up", 2) == 0)
+    return "up";
+
+  if (length == 4 && strncasecmp(line, "down", 4) == 0)
+    return "down";
+
+  return NULL;
+}
+
+/** Text without the whitespace around it, as a new string. */
+static char *trimmed(const char *from, const char *to) {
+
+  while (from < to && strchr(" \t\r\n", *from) != NULL)
+    ++from;
+
+  while (to > from && strchr(" \t\r\n", to[-1]) != NULL)
+    --to;
+
+  return strndup(from, (size_t)(to - from));
+}
+
+bool dbmSqlSections(const char *text, const char *file, char **up,
+                    char **down, char *why, size_t room) {
+
+  const char *upAt = NULL, *upEnd = NULL, *downAt = NULL, *downEnd = NULL;
+  const char *current = NULL;
+  const char *line = text;
+
+  *up = NULL;
+  *down = NULL;
+
+  for (long number = 1; *line != '\0'; ++number) {
+
+    size_t length = strcspn(line, "\n");
+    const char *next = line + length + (line[length] == '\n');
+    const char *section = sectionOf(line, length);
+
+    if (section != NULL) {
+
+      bool isUp = strcmp(section, "up") == 0;
+
+      if ((isUp && upAt != NULL) || (!isUp && downAt != NULL)) {
+        dbmWrite(why, room, TEXT`${file}:${number}: the section "${section}" is defined twice`);
+        return false;
+      }
+
+      /* the section before ends where this one starts */
+      if (current == upAt && upAt != NULL && upEnd == NULL)
+        upEnd = line;
+      if (current == downAt && downAt != NULL && downEnd == NULL)
+        downEnd = line;
+
+      if (isUp)
+        upAt = current = next;
+      else
+        downAt = current = next;
+    } else if (current == NULL) {
+
+      const char *at = line;
+      size_t left = length;
+
+      while (left > 0 && strchr(" \t\r", *at) != NULL)
+        ++at, --left;
+
+      if (left > 0 && !(left >= 2 && at[0] == '-' && at[1] == '-')) {
+        dbmWrite(why, room, TEXT`${file}:${number}: SQL before the first section, start the migration with a line "-- up"`);
+        return false;
+      }
+    }
+
+    line = next;
+  }
+
+  if (upAt == NULL) {
+    dbmWrite(why, room, TEXT`${file}: missing the section "-- up"`);
+    return false;
+  }
+
+  *up = trimmed(upAt, upEnd != NULL ? upEnd : line);
+  *down = downAt != NULL ? trimmed(downAt, downEnd != NULL ? downEnd : line)
+                         : strdup("");
+  return true;
+}
+
+bool dbmLoadSqlMigration(const char *file, const char *name) {
+
+  char why[600];
+  char *text = slurp(file);
+  char *up;
+  char *down;
+
+  if (text == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] cannot read ${file}\n`);
+    return false;
+  }
+
+  bool ok = dbmSqlSections(text, file, &up, &down, why, sizeof why);
+
+  free(text);
+
+  if (!ok) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
     return false;
   }
 

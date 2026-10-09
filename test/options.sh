@@ -65,6 +65,27 @@ expect "without the option the up runs" "legacy,migrations,migrations_state" \
   "$(tables)"
 "$meta" reset >/dev/null 2>&1
 
+# ------------------------------------------- db-migrate-plugin-sql's format
+
+"$meta" create users --sql >/dev/null
+users=$(ls migrations/*-users.sql)
+expect "create --sql writes the plugin's template" "-- up|||-- down||" \
+  "$(tr '\n' '|' <"$users")"
+printf -- '-- comments before it are fine\n-- UP\ncreate table users (id int);\n--  down\ndrop table users;\n' >"$users"
+"$meta" up >/dev/null 2>&1
+expect "its up section runs, the markers in any case" 1 \
+  "$(sqlite3 dbm.sqlite "select count(*) from sqlite_master where name = 'users'")"
+"$meta" down >/dev/null 2>&1
+expect "and its down" 0 \
+  "$(sqlite3 dbm.sqlite "select count(*) from sqlite_master where name = 'users'")"
+printf 'select 1;\n-- up\nselect 2;\n' >"$users"
+expect "SQL before the first section is refused, as the plugin does" 1 \
+  "$("$meta" up 2>&1 | grep -c 'users.sql:1: SQL before the first section')"
+printf -- '-- up\nselect 1;\n-- up\n' >"$users"
+expect "and a section twice" 1 \
+  "$("$meta" up 2>&1 | grep -c 'users.sql:3: the section "up" is defined twice')"
+rm -f "$users"
+
 # --------------------------------------------------------------- log-level
 
 expect "--log-level error leaves only errors" "" \

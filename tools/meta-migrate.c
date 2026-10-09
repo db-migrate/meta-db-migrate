@@ -393,12 +393,17 @@ static void listOne(const char *dir, const char *as) {
     char path[1100];
     char named[1100];
 
-    if (length < 3 || strcmp(entry->d_name + length - 2, ".c") != 0)
+    bool code = length > 2 && strcmp(entry->d_name + length - 2, ".c") == 0;
+
+    /* and db-migrate-plugin-sql's: one file, its up and down sections */
+    bool sql = length > 4 && strcmp(entry->d_name + length - 4, ".sql") == 0;
+
+    if (!code && !sql)
       continue;
 
     dbmWrite(path, sizeof path, TEXT`${dir}/${entry->d_name}`);
     dbmWrite(named, sizeof named, TEXT`${as}/${entry->d_name}`);
-    dbmRegisterLazily(named, path, compileAndOpen);
+    dbmRegisterLazily(named, path, code ? compileAndOpen : dbmLoadSqlMigration);
   }
 
   if (listing != NULL)
@@ -533,11 +538,64 @@ static char *slurp(const char *path) {
  * dependency on the directory it was made from.
  */
 /** The pairs in one sqls/ directory, named from `as` - `migrations[/scope]`. */
+/** One of db-migrate-plugin-sql's files, split into its up and down. */
+static bool embedSections(FILE *out, const char *dir, const char *as,
+                          const char *name) {
+
+  char file[1200];
+  char why[1400];
+  char *up = NULL;
+  char *down = NULL;
+
+  dbmWrite(file, sizeof file, TEXT`${dir}/${name}`);
+
+  char *text = slurp(file);
+
+  if (text == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] cannot read ${file}\n`);
+    return false;
+  }
+
+  bool ok = dbmSqlSections(text, file, &up, &down, why, sizeof why);
+
+  free(text);
+
+  if (!ok) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    return false;
+  }
+
+  dbmSay(out, TEXT`  dbmRegisterSql("${as}/${name}",\n    `);
+  literal(out, up);
+  fputs(",\n    ", out);
+  literal(out, down);
+  fputs(");\n", out);
+
+  free(up);
+  free(down);
+  return true;
+}
+
 static bool embedOne(FILE *out, const char *dir, const char *as) {
 
   char sqls[1100];
   DIR *listing;
   bool ok = true;
+
+  /* db-migrate-plugin-sql's, beside the code: split here, embedded as two */
+  listing = opendir(dir);
+
+  for (struct dirent *entry = listing != NULL ? readdir(listing) : NULL;
+       ok && entry != NULL; entry = readdir(listing)) {
+
+    size_t length = strlen(entry->d_name);
+
+    if (length > 4 && strcmp(entry->d_name + length - 4, ".sql") == 0)
+      ok = embedSections(out, dir, as, entry->d_name);
+  }
+
+  if (listing != NULL)
+    closedir(listing);
 
   dbmWrite(sqls, sizeof sqls, TEXT`${dir}/sqls`);
   listing = opendir(sqls);

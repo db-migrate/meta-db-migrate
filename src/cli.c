@@ -17,6 +17,7 @@
  *   --config FILE        database.json somewhere else, or database.yml
  *   --dry-run            print the statements instead of sending them
  *   --sql-file           `create` writes an up and a down .sql file instead
+ *   --sql                `create` writes one .sql file, `-- up` and `-- down`
  *   --migrations-dir D   where `create` writes (migrations)
  *
  * Without a database.json, a database.yml (or whatever a plugin reads) is
@@ -43,6 +44,7 @@ typedef struct {
   bool countGiven;
   bool dryRun;
   bool sqlFile;
+  bool sql;
   bool v2File;
   bool ignoreOnInit;
   const char *logLevel;
@@ -77,7 +79,7 @@ commands:
   fix                rebuild node's state from the v2 migrations that ran
                      (--backup-state keeps the old one)
   create name        a new migration in migrations/
-                     (--sql-file, --v2-file or --template NAME for another kind)
+                     (--sql, --sql-file, --v2-file, --template NAME)
 
   command:scope      the same in migrations/scope/ - up:billing, create:billing
   db:create name     a database, if it is not there yet
@@ -97,6 +99,8 @@ options:
   -v, --verbose               print every statement as it is sent
   --non-transactional         no transaction around a migration
   --sql-file                  create: an up and a down .sql file instead
+  --sql                       create: one .sql file with an up and a down
+                              section, as db-migrate-plugin-sql writes it
   --v2-file                   create: a v2 migration, undone by what it learns
   --ignore-on-init            create: an up that is skipped when run with it;
                               up: record those without running them
@@ -153,6 +157,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->dryRun = true;
     else if (strcmp(word, "--sql-file") == 0)
       into->sqlFile = true;
+    else if (strcmp(word, "--sql") == 0)
+      into->sql = true;
     else if (strcmp(word, "--v2-file") == 0)
       into->v2File = true;
     else if (strcmp(word, "--ignore-on-init") == 0)
@@ -455,6 +461,24 @@ static int create(const options_t *options) {
     }
 
     return write(dir, stamp, options->name);
+  }
+
+  /* db-migrate-plugin-sql's: one file, with the template it writes */
+  if (options->sql) {
+
+    dbmWrite(path, sizeof path, TEXT`${dir}/${stamp}-${options->name}.sql`);
+
+    FILE *file = fopen(path, "wx");
+
+    if (file == NULL) {
+      perror(path);
+      return 1;
+    }
+
+    dbmSay(file, TEXT`-- up\n\n\n-- down\n\n`);
+    fclose(file);
+    dbmSay(stdout, TEXT`[INFO] Created migration at ${path}\n`);
+    return 0;
   }
 
   if (options->sqlFile)

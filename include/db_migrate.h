@@ -336,6 +336,18 @@ void dbmRegisterSql(const char *file, const char *up, const char *down);
  */
 bool dbmLoadSqlFiles(const char *upFile, const char *name);
 
+/**
+ * A migration in one SQL file, as db-migrate-plugin-sql writes them: a line
+ * `-- up`, its SQL, and optionally a line `-- down` and its SQL - nothing
+ * but comments before the first, no section twice. Each section trimmed,
+ * as a new string; a missing down is "". False, with the reason.
+ */
+bool dbmSqlSections(const char *text, const char *file, char **up,
+                    char **down, char *why, size_t room);
+
+/** A loader for `dbmRegisterLazily`: one such file. */
+bool dbmLoadSqlMigration(const char *file, const char *name);
+
 /** Every migration registered so far, sorted by name. */
 const dbm_migration_t *dbmMigrations(size_t *count);
 
