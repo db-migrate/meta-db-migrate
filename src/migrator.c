@@ -388,6 +388,8 @@ void dbmRegisterMeta(const char *file, json_t meta) {
 
   entry->background = strcmp(meta.get("background").kind(), "bool") == 0 &&
                       meta.get("background").truth();
+  entry->blocking = strcmp(meta.get("blocking").kind(), "bool") == 0 &&
+                    meta.get("blocking").truth();
 
   /* what node refuses when the migration runs, refused then here too */
   if (strcmp(type.kind(), "nothing") != 0 &&

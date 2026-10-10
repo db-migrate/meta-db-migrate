@@ -454,8 +454,10 @@ typedef struct {
   /** node's `_meta.release`: the label of the release it starts, or NULL. */
   const char *release;
 
-  /** node's `_meta.background`, for a dml migration run by `work`. */
+  /** node's `_meta.background`, for a dml migration run by `work`, and
+      `_meta.blocking`: the jobs after it wait until it is done. */
   bool background;
+  bool blocking;
 
   /** What is wrong with its `_meta`, said when it would run, or NULL. */
   const char *invalid;
@@ -722,6 +724,48 @@ typedef struct {
  */
 int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
                  size_t room);
+
+/**
+ * How the background jobs are run - node's executeWork options; zeroed is
+ * its defaults. `done` and `failed` say afterwards how it went.
+ */
+typedef struct {
+  /** Jobs at once, each in a process of its own with its own connections (1). */
+  long parallel;
+
+  /** Milliseconds between two batches of a job (0), rows in a batch (1000). */
+  long pause;
+  long batch;
+
+  /** Milliseconds between looking for jobs while there are none (5000). */
+  long interval;
+
+  /** A job its worker did not renew for this long is taken over (60000). */
+  long timeout;
+
+  /** Go on looking for jobs when there are none, until dbmWorkStop. */
+  bool watch;
+
+  /** Only say which jobs would run. */
+  bool dryRun;
+
+  long done;
+  long failed;
+} dbm_work_t;
+
+/**
+ * The background jobs run - node's executeWork, and `migrate work`. Blocks
+ * until there are none, or with `watch` until dbmWorkStop; answers -1 with
+ * the reason when a job failed or the worker could not go on.
+ */
+int dbmWork(json_t config, const dbm_options_t *options, dbm_work_t *work,
+            char *why, size_t room);
+
+/**
+ * The jobs stopped after their current batch, to go on with the next run.
+ * Safe in a signal handler.
+ */
+void dbmWorkStop(void);
 
 /**
  * `db-migrate up -e dev --count 2`, read the way node db-migrate reads it:

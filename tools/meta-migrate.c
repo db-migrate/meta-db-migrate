@@ -829,7 +829,9 @@ int main(int argc, char **argv) {
     else if ((word in {"-e", "--env", "--config", "-c", "--count", "-t",
                        "--table", "--migration-table", "-s", "--state",
                        "--state-table", "--lock-timeout", "--lock-interval",
-                       "--template", "--log-level"}) && i + 1 < argc)
+                       "--template", "--log-level", "--parallel", "--pause",
+                       "--batch", "--interval", "--job-timeout"}) &&
+             i + 1 < argc)
       ++i;
     else if (word in {"-h", "--help", "-?", "-i", "--version"})
       asking = true;

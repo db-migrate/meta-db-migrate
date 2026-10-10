@@ -28,11 +28,13 @@
 #include <db_migrate_driver.h>
 #include <db_migrate_plugin.h>
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 typedef struct {
   const char *command;
@@ -46,6 +48,9 @@ typedef struct {
 
   /** `--ignore-completed-migrations`: as if nothing had run. */
   bool ignoreCompleted;
+
+  /** `work`: how the background jobs are run. */
+  dbm_work_t work;
 
   /** `seed down pets`: the seed after down or reset. */
   const char *second;
@@ -75,6 +80,8 @@ typedef struct {
   long lockInterval;
 } options_t;
 
+static int work(options_t *options, json_t config);
+
 static int help(void) {
 
   dbmSay(stdout, TEXT`usage: migrate <command> [name] [options]
@@ -90,6 +97,8 @@ commands:
   create name        a new migration in migrations/
                      (--sql, --sql-file, --v2-file, --template NAME)
 
+  work               run the background jobs (--parallel N, --pause MS,
+                     --batch N, --interval MS, --job-timeout MS, --watch)
   seed [name]        the seeds in seeds/ again: what they inserted removed, run
   seed down [name]   what the seeds inserted removed (seed reset: all of them)
 
@@ -259,6 +268,18 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->logLevel = argv[++i];
     else if (strcmp(word, "--ignore-completed-migrations") == 0)
       into->ignoreCompleted = true;
+    else if (strcmp(word, "--parallel") == 0 && hasNext)
+      into->work.parallel = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--pause") == 0 && hasNext)
+      into->work.pause = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--batch") == 0 && hasNext)
+      into->work.batch = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--interval") == 0 && hasNext)
+      into->work.interval = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--job-timeout") == 0 && hasNext)
+      into->work.timeout = strtol(argv[++i], NULL, 10);
+    else if (strcmp(word, "--watch") == 0)
+      into->work.watch = true;
     else if (strcmp(word, "--template") == 0 && hasNext)
       into->template = argv[++i];
     /* the launcher reads it; a program has its seeds compiled in */
@@ -752,7 +773,7 @@ static int database(const options_t *options, json_t config) {
  * learned - through a connection of its own, so it outlives a migration's
  * transaction being rolled back on the other one. NULL, with the reason.
  */
-static driver_t *connected(json_t config, const dbm_options_t *options,
+driver_t *dbmConnect(json_t config, const dbm_options_t *options,
                            bool readOnly, driver_t **stateDriver, char *why,
                            size_t room) {
 
@@ -792,7 +813,7 @@ static driver_t *connected(json_t config, const dbm_options_t *options,
   return driver;
 }
 
-static void disconnected(driver_t *driver, driver_t *stateDriver) {
+void dbmDisconnect(driver_t *driver, driver_t *stateDriver) {
   dbmStateClose(driver->state);
   dbmClose(stateDriver);
   dbmClose(driver);
@@ -965,7 +986,7 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
       .deprecation = options->deprecation,
   };
   driver_t *stateDriver;
-  driver_t *driver = connected(
+  driver_t *driver = dbmConnect(
       config, &settings,
       options->dryRun || strcmp(options->command, "check") == 0, &stateDriver,
       why, sizeof why);
@@ -1017,7 +1038,7 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
   else
     answer = dbmCheck(driver);
 
-  disconnected(driver, stateDriver);
+  dbmDisconnect(driver, stateDriver);
   return answer == 0 ? 0 : 1;
 }
 
@@ -1065,7 +1086,7 @@ int dbmCli(int argc, char **argv) {
     return create(&options);
 
   if (!(options.command in {"up", "down", "reset", "check", "sync", "db",
-                            "fix", "seed"}))
+                            "fix", "seed", "work"}))
     return usage();
 
   if (strcmp(options.command, "db") == 0 &&
@@ -1092,6 +1113,9 @@ int dbmCli(int argc, char **argv) {
   /* `up --check` is node's way of asking `check` */
   if (options.checkOnly && options.command in {"up", "sync"})
     options.command = "check";
+
+  if (strcmp(options.command, "work") == 0)
+    return work(&options, config);
 
   if (strcmp(options.command, "db") == 0) {
 
@@ -1130,6 +1154,54 @@ int dbmCli(int argc, char **argv) {
              : 0;
 }
 
+static void stopWork(int signal) {
+
+  static const char said[] = "[INFO] [jobs] stopping after the current batches\n";
+
+  (void)signal;
+
+  if (write(STDOUT_FILENO, said, sizeof said - 1) < 0)
+    return;
+
+  dbmWorkStop();
+}
+
+/** `work`: the background jobs run, until there are none, or with --watch until stopped. */
+static int work(options_t *options, json_t config) {
+
+  char why[600] = "";
+  dbm_tunnel_t *tunnel = NULL;
+
+  if (!dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+    return 1;
+  }
+
+  dbm_options_t settings = {
+      .migrationTable = options->table,
+      .stateTable = options->stateTable,
+      .lockTimeout = options->lockTimeout,
+      .lockInterval = options->lockInterval,
+      .verbose = options->verbose,
+      .deprecation = options->deprecation,
+  };
+  signal(SIGINT, stopWork);
+  signal(SIGTERM, stopWork);
+
+  options->work.dryRun = options->dryRun;
+
+  int answer = dbmWork(config, &settings, &options->work, why, sizeof why);
+
+  if (!options->dryRun)
+    dbmSay(stdout, TEXT`[INFO] [jobs] ${options->work.done} job(s) done\n`);
+
+  if (answer != 0)
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+
+  dbmTunnelClose(tunnel);
+  return answer != 0 ? 1 : 0;
+}
+
 int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
                  size_t room) {
 
@@ -1155,14 +1227,14 @@ int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
   defer dbmTunnelClose(tunnel);
 
   driver_t *stateDriver;
-  driver_t *driver = connected(own, options, false, &stateDriver, why, room);
+  driver_t *driver = dbmConnect(own, options, false, &stateDriver, why, room);
 
   if (driver == NULL)
     return -1;
 
   int answer = dbmUp(driver, 0, NULL, false);
 
-  disconnected(driver, stateDriver);
+  dbmDisconnect(driver, stateDriver);
 
   if (answer != 0)
     dbmWrite(why, room, TEXT`${dbmLastError()[0] != '\0' ? dbmLastError() : "migrating failed"}`);

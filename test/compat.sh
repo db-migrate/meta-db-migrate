@@ -150,7 +150,8 @@ run_meta() { (cd "$work/meta" && "$meta" "$@"); }
 all="/20261008160000-pets,/20261008170000-tags,/20261008180000-visits"
 everything="migrations,migrations_state,owners,pets,tags,visits"
 empty="migrations,migrations_state"
-internal="__dbmigrate_schema__,__dbmigrate_state__"
+# both pause the background jobs around a locked run, which leaves their row
+internal="__dbmigrate_jobs__,__dbmigrate_schema__,__dbmigrate_state__"
 
 # one direction: $1 migrated so far, $2 takes over
 transition() {

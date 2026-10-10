@@ -62,7 +62,16 @@ struct dml_t {
 
   bool failed;
   char error[600];
+
+  /** Run by a worker: its job, and whether it stopped, to go on later. */
+  dbm_job_t *job;
+  bool stopped;
+
+  /** What a failure did was reverted. */
+  bool rolledBack;
 };
+
+static int between(dml_t *self);
 
 /* ------------------------------------------------------------------ */
 /* failing                                                            */
@@ -460,7 +469,7 @@ static void byKey(dml_t *self, statement_t *into, json_t rows,
   }
 }
 
-static long batchOf(json_t options) {
+static long batchOf(dml_t *self, json_t options) {
 
   json_t batch = options.get("batch");
 
@@ -470,6 +479,10 @@ static long batchOf(json_t options) {
 
   if (isText(batch) && atol(batch.text()) > 0)
     return atol(batch.text());
+
+  /* the worker's, for a job */
+  if (self->job != NULL && self->job->batch > 0)
+    return self->job->batch;
 
   return BATCH;
 }
@@ -521,7 +534,7 @@ static int untilDone(dml_t *self, const char *table, yyjson_mut_val *key,
     answer = alone(self, &batch);
     closed(&batch);
 
-    if (answer != 0)
+    if (answer != 0 || between(self))
       return -1;
   }
 }
@@ -550,6 +563,14 @@ static int save(dml_t *self) {
 }
 
 /** A field of the lock row set to a step - "step", "learned", "done". */
+/** A worker stops: not a failure, the job goes on with the next run. */
+static int stopping(dml_t *self) {
+  self->stopped = true;
+  return fail(self, TEXT`stopped`);
+}
+
+/** A field of the lock row set to a step - "step", "learned", "done" -
+    or of the job, for one run by a worker. */
 static int mark(dml_t *self, const char *field, long op) {
 
   char changes[64];
@@ -558,7 +579,43 @@ static int mark(dml_t *self, const char *field, long op) {
     return 0;
 
   dbmWrite(changes, sizeof changes, TEXT`{"${field}":${op}}`);
+
+  if (self->job != NULL) {
+
+    char why[300];
+
+    if (dbmJobUpdate(self->job, changes, why, sizeof why))
+      return fail(self, TEXT`${why}`);
+
+    return self->job->lost ? stopping(self) : 0;
+  }
+
   return dbmStateMark(self->state, changes) ? failedState(self) : 0;
+}
+
+/**
+ * Between two steps or batches, a worker stops when it is asked to, gives
+ * way to migrations, and pauses.
+ */
+static int between(dml_t *self) {
+
+  dbm_job_t *job = self->job;
+
+  if (job == NULL)
+    return 0;
+
+  if (job->lost || (job->stopping != NULL && *job->stopping))
+    return stopping(self);
+
+  if (dbmJobsPaused(self->state, job->seen)) {
+    dbmSay(stdout, TEXT`[INFO] [jobs] ${self->name} pauses for migrations\n`);
+    return stopping(self);
+  }
+
+  if (job->pause > 0)
+    dbmSleep(job->pause);
+
+  return 0;
 }
 
 typedef bool (*mutation_t)(yyjson_mut_doc *doc, yyjson_mut_val *value,
@@ -1025,7 +1082,7 @@ static int finished(dml_t *self, int answer) {
   }
 
   self->done = self->op;
-  return mark(self, "done", self->op);
+  return mark(self, "done", self->op) || between(self) ? -1 : 0;
 }
 
 /** A new entry: {t, a, c: []}, c to fill. */
@@ -1168,7 +1225,7 @@ static int batches(dml_t *self, yyjson_mut_val *entry, long size,
     if (self->driver->verbose)
       dbmSay(stdout, TEXT`[dml] ${self->name}: ${numberOf(entry, "o")} rows ${textOf(yyjson_mut_obj_get(entry, "a"))}d\n`);
 
-    if (save(self))
+    if (save(self) || between(self))
       return -1;
   }
 }
@@ -1404,7 +1461,7 @@ int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
       yyjson_mut_arr_append(kept, yyjson_mut_val_mut_copy(self->record, yyjson_mut_arr_get(columns, i)));
 
     answer = backup(self, entry, table, kept, &condition) ||
-             batches(self, entry, batchOf(options), &change);
+             batches(self, entry, batchOf(self, options), &change);
   }
 
   closed(&change);
@@ -1608,7 +1665,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
     }
 
     if (answer == 0)
-      answer = untilDone(self, table, key, &active, batchOf(options), &change);
+      answer = untilDone(self, table, key, &active, batchOf(self, options), &change);
   }
 
   closed(&change);
@@ -1684,7 +1741,7 @@ int dml_t__deleteWith(dml_t *self, const char *table, json_t where,
     answer = alone(self, &change);
   } else if (answer == 0) {
     answer = backup(self, entry, table, NULL, &condition) ||
-             batches(self, entry, batchOf(options), &change);
+             batches(self, entry, batchOf(self, options), &change);
   }
 
   closed(&change);
@@ -1749,7 +1806,7 @@ int dml_t__purgeWith(dml_t *self, const char *table, const char *migration,
     followedBy(&change, &condition);
     answer = sent(self, &change, NULL, false);
   } else {
-    answer = untilDone(self, table, key, &condition, batchOf(options), &change);
+    answer = untilDone(self, table, key, &condition, batchOf(self, options), &change);
   }
 
   closed(&change);
@@ -2241,11 +2298,137 @@ static const char *recoveryOf(const dbm_migration_t *migration, const char *name
 }
 
 /**
- * A dml migration up: an interrupted run recovered first, its steps run and
- * recorded, and on a failure everything it did reverted from that record -
- * unless one of its steps can not be reverted: then the steps executed stay,
- * and the next run continues after them. Answers 0 when it ran; the reason
- * for anything else is in `why`, or was said already.
+ * A run started over after its interrupted one was rolled back: in the
+ * lock row, or for a worker in its job - with its record again, which
+ * reverting deleted and node's worker never writes back.
+ */
+static int restart(dml_t *db, const char *hash) {
+
+  dbm_state_t *state = db->state;
+
+  if (db->job != NULL) {
+
+    char changes[200];
+    char why[300];
+    char *row = NULL;
+
+    dbmWrite(changes, sizeof changes, TEXT`{"step":0,"learned":0,"done":0,"rb":0,"h":"${hash != NULL ? hash : ""}"}`);
+
+    if (dbmJobUpdate(db->job, changes, why, sizeof why))
+      return fail(db, TEXT`${why}`);
+
+    if (dbmKvGet(state->db, state->table, db->name, &row) ||
+        (row == NULL && dbmKvInsert(state->db, state->table, db->name, "{}")))
+      return failedState(db);
+
+    free(row);
+    return 0;
+  }
+
+  char *stored = dbmStateProgress(state, -1, 1) == 0
+                     ? dbmStateBegin(state, db->name, "up", hash, NULL)
+                     : NULL;
+
+  if (stored == NULL)
+    return fail(db, TEXT`could not begin the state of ${db->name}: ${state->db->error}`);
+
+  free(stored);
+  return 0;
+}
+
+/**
+ * A dml migration run, its start recorded and its record read: an
+ * interrupted run recovered first, its steps run and recorded, and on a
+ * failure everything it did reverted from that record - unless one of its
+ * steps can not be reverted: then the steps executed stay, and the next run
+ * continues after them. 0 when it ran, 1 when a worker stopped it to go on
+ * later, -1 when it failed; the reason in `why`, or said already.
+ */
+static int execute(dml_t *db, const dbm_migration_t *migration,
+                   dbm_interrupted_t *interrupted, const char *hash,
+                   char *why, size_t room) {
+
+  if (interrupted->found) {
+
+    const char *mode = recoveryOf(migration, db->name, interrupted, why, room);
+
+    if (mode == NULL)
+      return -1;
+
+    dbmSay(stderr, TEXT`[WARN] [recovery] ${db->name}: the previous run was interrupted at step ${interrupted->step}, ${interrupted->done} steps were executed, recovering by ${mode}\n`);
+
+    if (strcmp(mode, "rollback") == 0) {
+
+      if (mark(db, "rb", 1) || revert(db)) {
+        if (db->stopped)
+          return 1;
+        dbmWrite(why, room, TEXT`could not roll back the interrupted run: ${db->error}`);
+        return -1;
+      }
+
+      yyjson_mut_doc_free(db->record);
+      db->record = dbmRecordFrom(NULL);
+
+      if (restart(db, hash)) {
+        dbmWrite(why, room, TEXT`${db->error}`);
+        return -1;
+      }
+    } else {
+      db->recovery = interrupted;
+      db->done = (int)interrupted->done;
+    }
+  }
+
+  if (migration->dml(db) != 0 && !db->failed)
+    fail(db, TEXT`the migration answered non-zero without saying why`);
+
+  if (db->stopped)
+    return 1;
+
+  if (!db->failed)
+    return 0;
+
+  char reason[600];
+  char instruction[700] = "";
+  char irreversible[600];
+
+  /* "at" the step that failed, "after" the last one when the code failed */
+  if (db->op > 0)
+    dbmWrite(instruction, sizeof instruction, TEXT`${db->done >= db->op ? "after" : "at"} step ${(long)db->op} ${db->current}`);
+
+  dbmWrite(reason, sizeof reason, TEXT`${db->error}`);
+  dbmSayFailure(db->driver, db->name,
+                instruction[0] != '\0' ? instruction : NULL, reason);
+  dbmWrite(why, room, TEXT`${reason}`);
+  irreversibleSteps(db, irreversible, sizeof irreversible);
+
+  /* the run stays unfinished, the next continues it */
+  if (irreversible[0] != '\0') {
+    dbmSay(stderr, TEXT`[ERROR] Migration "${db->name}" failed and can not be rolled back, it ran a step which can not be reverted. The steps executed stay, the next run continues after them.\n`);
+    return -1;
+  }
+
+  /* the record of the failed step reverts what it changed, if anything */
+  dbmSay(stderr, TEXT`[ERROR] Migration "${db->name}" failed, rolling back: ${reason}\n`);
+  db->failed = false;
+  db->error[0] = '\0';
+
+  if (mark(db, "rb", 1) || revert(db) ||
+      (db->job == NULL && !db->dry && dbmStateProgress(db->state, -1, 1))) {
+    if (db->stopped)
+      return 1;
+    dbmSay(stderr, TEXT`[ERROR] and reverting it failed too: ${db->error[0] != '\0' ? db->error : db->state->db->error}\n`);
+  } else {
+    db->rolledBack = true;
+  }
+
+  return -1;
+}
+
+/**
+ * A dml migration up, in the foreground: its start in the lock row, then
+ * run. Answers 0 when it ran; the reason for anything else is in `why`, or
+ * was said already.
  */
 int dbmUpDml(driver_t *driver, dbm_state_t *state,
              const dbm_migration_t *migration, char *why, size_t room) {
@@ -2268,86 +2451,79 @@ int dbmUpDml(driver_t *driver, dbm_state_t *state,
   db.record = dbmRecordFrom(stored);
   free(stored);
 
-  if (interrupted.found) {
+  int answer = execute(&db, migration, &interrupted, hash, why, room);
 
-    const char *mode = recoveryOf(migration, db.name, &interrupted, why, room);
+  /* a failure said with its statement leaves nothing for the walker */
+  if (answer != 0 && db.op > 0)
+    why[0] = '\0';
 
-    if (mode == NULL) {
-      yyjson_mut_doc_free(db.record);
-      return -1;
-    }
+  yyjson_mut_doc_free(db.record);
+  return answer == 0 ? 0 : -1;
+}
 
-    dbmSay(stderr, TEXT`[WARN] [recovery] ${db.name}: the previous run was interrupted at step ${interrupted.step}, ${interrupted.done} steps were executed, recovering by ${mode}\n`);
+int dbmRunJob(driver_t *driver, dbm_state_t *state,
+              const dbm_migration_t *migration, dbm_job_t *job,
+              bool *rolledBack, char *why, size_t room) {
 
-    if (strcmp(mode, "rollback") == 0) {
+  dml_t db = {.driver = driver, .state = state,
+              .name = dbmKeyOf(migration->name), .dry = false,
+              .transactional = !migration->noTransaction &&
+                               !driver->noTransactions,
+              .job = job};
+  dbm_interrupted_t interrupted = {0};
+  char hex[65];
+  const char *hash = dbmHashOf(migration, hex);
+  char *jobs = dbmJobsRead(state);
+  char *stored = NULL;
 
-      if (mark(&db, "rb", 1) || revert(&db)) {
-        dbmWrite(why, room, TEXT`could not roll back the interrupted run: ${db.error}`);
-        yyjson_mut_doc_free(db.record);
-        return -1;
-      }
+  *rolledBack = false;
 
-      yyjson_mut_doc_free(db.record);
-      db.record = dbmRecordFrom(NULL);
-
-      /* and started afresh */
-      stored = dbmStateProgress(state, -1, 1) == 0
-                   ? dbmStateBegin(state, db.name, "up", hash, NULL)
-                   : NULL;
-
-      if (stored == NULL) {
-        dbmWrite(why, room, TEXT`could not begin the state of ${db.name}: ${state->db->error}`);
-        yyjson_mut_doc_free(db.record);
-        return -1;
-      }
-
-      free(stored);
-    } else {
-      db.recovery = &interrupted;
-      db.done = (int)interrupted.done;
-    }
-  }
-
-  if (migration->dml(&db) != 0 && !db.failed)
-    fail(&db, TEXT`the migration answered non-zero without saying why`);
-
-  if (!db.failed) {
-    yyjson_mut_doc_free(db.record);
-    return 0;
-  }
-
-  char reason[600];
-  char instruction[700] = "";
-  char irreversible[600];
-
-  /* "at" the step that failed, "after" the last one when the code failed */
-  if (db.op > 0)
-    dbmWrite(instruction, sizeof instruction, TEXT`${db.done >= db.op ? "after" : "at"} step ${(long)db.op} ${db.current}`);
-
-  dbmWrite(reason, sizeof reason, TEXT`${db.error}`);
-  dbmSayFailure(driver, db.name, instruction[0] != '\0' ? instruction : NULL,
-                reason);
-  why[0] = '\0';
-  irreversibleSteps(&db, irreversible, sizeof irreversible);
-
-  /* the run stays unfinished in the lock row, the next continues it */
-  if (irreversible[0] != '\0') {
-    dbmSay(stderr, TEXT`[ERROR] Migration "${db.name}" failed and can not be rolled back, it ran a step which can not be reverted. The steps executed stay, the next run continues after them.\n`);
-    yyjson_mut_doc_free(db.record);
+  if (jobs == NULL || dbmStateReloadSchema(state) ||
+      dbmKvGet(state->db, state->table, db.name, &stored)) {
+    free(jobs);
+    dbmWrite(why, room, TEXT`${state->db->error}`);
     return -1;
   }
 
-  /* the record of the failed step reverts what it changed, if anything */
-  dbmSay(stderr, TEXT`[ERROR] Migration "${db.name}" failed, rolling back: ${reason}\n`);
-  db.failed = false;
-  db.error[0] = '\0';
+  /* how far an earlier run of it got, from the job */
+  json_t read = meta_toJSON(jobs);
+  json_t was = read.get("jobs").get(job->name);
+  const char *h = strcmp(was.get("h").kind(), "string") == 0 ? was.get("h").text() : "";
 
-  if (mark(&db, "rb", 1) || revert(&db) ||
-      (!db.dry && dbmStateProgress(state, -1, 1)))
-    dbmSay(stderr, TEXT`[ERROR] and reverting it failed too: ${db.error[0] != '\0' ? db.error : state->db->error}\n`);
+  free(jobs);
 
+  if (was.get("step").number() > 0) {
+    interrupted.found = true;
+    interrupted.step = was.get("step").number();
+    interrupted.learned = was.get("learned").number();
+    interrupted.done = was.get("done").number();
+    interrupted.rollback = was.get("rb").number() == 1;
+    interrupted.changed = h[0] != '\0' && hash != NULL && strcmp(h, hash) != 0;
+  }
+
+  read.release();
+  db.record = dbmRecordFrom(stored);
+  free(stored);
+
+  if (!interrupted.found) {
+
+    char changes[100];
+
+    dbmWrite(changes, sizeof changes, TEXT`{"h":"${hash != NULL ? hash : ""}"}`);
+
+    if (dbmJobUpdate(job, changes, why, room) || job->lost) {
+      yyjson_mut_doc_free(db.record);
+      return job->lost ? 1 : -1;
+    }
+  }
+
+  dbmSay(stdout, TEXT`[INFO] [jobs] ${interrupted.found ? "continuing" : "running"} ${job->name}\n`);
+
+  int answer = execute(&db, migration, &interrupted, hash, why, room);
+
+  *rolledBack = db.rolledBack;
   yyjson_mut_doc_free(db.record);
-  return -1;
+  return answer;
 }
 
 /** A dml migration down: its record reverted, then forgotten. */

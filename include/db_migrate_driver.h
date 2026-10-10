@@ -506,6 +506,104 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
                        char *why, size_t room);
 void dbmDmlWarn(driver_t *driver, dbm_state_t *state);
 
+/**
+ * The connection a configuration names, and a second one for node's state
+ * through `stateDriver` - the lock, the schema - as the commands use them.
+ * NULL with the reason in `why`. Closed with dbmDisconnect.
+ */
+driver_t *dbmConnect(json_t config, const dbm_options_t *options,
+                     bool readOnly, driver_t **stateDriver, char *why,
+                     size_t room);
+void dbmDisconnect(driver_t *driver, driver_t *stateDriver);
+
+/**
+ * For a job: the releases counted as up counts them, and the state told the
+ * release of its migration.
+ */
+void dbmJobRelease(driver_t *driver, const dbm_migration_t *migration);
+
+/* ----------------------------------------------------- background jobs */
+
+#define DBM_JOBS "__dbmigrate_jobs__"
+
+/** Milliseconds on a clock that only goes forward, and a wait of some. */
+long dbmNow(void);
+void dbmSleep(long ms);
+
+/**
+ * A change of the jobs row - `jobs` its jobs, `root` the row - answering
+ * whether it changed anything. Run again when another worker wrote first.
+ */
+typedef bool (*dbm_jobs_mutation_t)(yyjson_mut_doc *doc, yyjson_mut_val *jobs,
+                                    yyjson_mut_val *root, void *context);
+
+int dbmJobsChange(dbm_state_t *state, dbm_jobs_mutation_t mutate,
+                  void *context, char *why, size_t room);
+
+/** The jobs row as JSON, `{"jobs":{}}` when there is none; NULL on failure. */
+char *dbmJobsRead(dbm_state_t *state);
+
+/** A background migration queued, or a failed one again. */
+int dbmJobsRegister(dbm_state_t *state, const char *name, bool blocking,
+                    char *why, size_t room);
+int dbmJobsRemove(dbm_state_t *state, const char *name, char *why,
+                  size_t room);
+
+/**
+ * The jobs paused for the migrations of the lock holder, and waited for
+ * until the running ones stopped - those whose worker does not answer for
+ * the lock timeout not - and resumed again.
+ */
+int dbmJobsPause(dbm_state_t *state, char *why, size_t room);
+void dbmJobsResume(dbm_state_t *state);
+
+/** Whether a migration holds the jobs paused; `seen` is the worker's memory. */
+bool dbmJobsPaused(dbm_state_t *state, yyjson_mut_doc *seen);
+
+/**
+ * The first job to run, by name, into `name`: 1 when one was taken, 0 when
+ * there is none, 2 while the jobs are paused, -1 on failure.
+ */
+int dbmJobsClaim(dbm_state_t *state, const char *id, yyjson_mut_doc *seen,
+                 long timeout, char *name, size_t room, char *why,
+                 size_t whyRoom);
+
+/** A job a worker runs. */
+typedef struct {
+  dbm_state_t *state;
+  char name[256];
+
+  /** The worker's id, and whether another worker took the job over. */
+  const char *id;
+  bool lost;
+
+  /** Set when the worker is to stop after the current batch. */
+  volatile int *stopping;
+
+  /** Between batches: a pause, and how many rows a batch has (0: 1000). */
+  long pause;
+  long batch;
+
+  /** What the worker remembers of what it saw, for the timeouts. */
+  yyjson_mut_doc *seen;
+} dbm_job_t;
+
+/** Fields of the job set, as a JSON object; null takes one away. */
+int dbmJobUpdate(dbm_job_t *job, const char *changes, char *why, size_t room);
+
+/** The job forgotten, its migration done. */
+int dbmJobDone(dbm_job_t *job, char *why, size_t room);
+
+/**
+ * A background migration run as a job: continued where an interrupted run
+ * stopped, its progress kept in the job. 0 when it ran, 1 when it stopped
+ * to continue later, -1 when it failed - `rolledBack` says whether what it
+ * did was reverted.
+ */
+int dbmRunJob(driver_t *driver, dbm_state_t *state,
+              const dbm_migration_t *migration, dbm_job_t *job,
+              bool *rolledBack, char *why, size_t room);
+
 /** dml migrations, recorded and reverted the way node does it. */
 int dbmUpDml(driver_t *driver, dbm_state_t *state,
              const dbm_migration_t *migration, char *why, size_t room);

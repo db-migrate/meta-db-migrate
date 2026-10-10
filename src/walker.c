@@ -178,6 +178,9 @@ static int stepV2(driver_t *driver, const dbm_migration_t *migration,
  * has run read again under it, because another process may have done the
  * work while this one waited. Nothing on a dry run, as node has it.
  */
+/** Whether this process paused the background jobs, to resume them. */
+static bool pausedJobs;
+
 static bool takeLock(driver_t *driver, json_t *names) {
 
   if (driver->state == NULL || driver->dryRun)
@@ -185,6 +188,16 @@ static bool takeLock(driver_t *driver, json_t *names) {
 
   if (!dbmStateLock(driver->state))
     return false;
+
+  /* migrations go first: the jobs stop after their batch, until we are done */
+  char why[300];
+
+  if (dbmJobsPause(driver->state, why, sizeof why)) {
+    dbmSay(stderr, TEXT`[ERROR] could not pause the background jobs: ${why}\n`);
+    return false;
+  }
+
+  pausedJobs = true;
 
   if (dbmStateReloadSchema(driver->state)) {
     dbmSay(stderr, TEXT`[ERROR] could not read the schema state: ${driver->state->db->error}\n`);
@@ -203,8 +216,82 @@ static bool takeLock(driver_t *driver, json_t *names) {
 
 static void giveLock(driver_t *driver) {
 
+  if (driver->state != NULL && pausedJobs)
+    dbmJobsResume(driver->state);
+
+  pausedJobs = false;
+
   if (driver->state != NULL)
     dbmStateUnlock(driver->state);
+}
+
+/* ------------------------------------------------------------------ */
+/* background jobs                                                    */
+/* ------------------------------------------------------------------ */
+
+/** The jobs as they are, `{"jobs":{...}}`. */
+static json_t jobsOf(driver_t *driver) {
+
+  char *text = driver->state != NULL ? dbmJobsRead(driver->state) : NULL;
+  json_t jobs = meta_toJSON(text != NULL ? text : "{\"jobs\":{}}");
+
+  free(text);
+  return jobs;
+}
+
+/** Whether a migration runs in the background - its job not failed. */
+static bool inBackground(json_t jobs, const char *name) {
+
+  json_t job = jobs.get("jobs").get(dbmKeyOf(name));
+
+  return strcmp(job.kind(), "object") == 0 &&
+         strcmp(job.get("s").text(), "failed") != 0;
+}
+
+/** The scope's migration a job runs, by its key. */
+static const dbm_migration_t *ofJob(const char *key) {
+
+  size_t total;
+  const dbm_migration_t *migrations = dbmMigrations(&total);
+
+  for (size_t i = 0; i < total; ++i)
+    if (inScope(migrations[i].name) &&
+        strcmp(dbmKeyOf(migrations[i].name), key) == 0)
+      return &migrations[i];
+
+  return NULL;
+}
+
+/** A background migration up: a job for `work` to run. */
+static int registered(driver_t *driver, const dbm_migration_t *migration) {
+
+  char why[300];
+
+  if (!dbmLoaded(migration))
+    return -1;
+
+  if (migration->invalid != NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${migration->invalid}\n`);
+    return -1;
+  }
+
+  if (driver->dryRun) {
+    dbmSay(stdout, TEXT`[INFO] [migration] ${shown(migration->name)} would run in the background\n`);
+    return 0;
+  }
+
+  if (driver->state == NULL) {
+    dbmSay(stderr, TEXT`[ERROR] Background migrations need a driver supporting the migration lock\n`);
+    return -1;
+  }
+
+  if (dbmJobsRegister(driver->state, dbmKeyOf(migration->name),
+                      migration->blocking, why, sizeof why)) {
+    dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
+    return -1;
+  }
+
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -342,6 +429,32 @@ static int enterRelease(driver_t *driver, const dbm_migration_t *migration,
   return 0;
 }
 
+void dbmJobRelease(driver_t *driver, const dbm_migration_t *migration) {
+
+  const char *was = scope;
+  static char own[256];
+  const char *slash = strrchr(migration->name, '/');
+  size_t length = slash != NULL ? (size_t)(slash - migration->name) : 0;
+
+  /* the releases of its scope, from the start */
+  dbmWrite(own, length + 1 < sizeof own ? length + 1 : sizeof own,
+           TEXT`${migration->name}`);
+  scope = own;
+
+  json_t none = meta_toJSON("[]");
+  releasesOf(driver, none);
+  none.release();
+
+  long at = placeOf(migration);
+
+  if (driver->state != NULL && at >= 0 && releaseOf != NULL) {
+    driver->state->releaseLabel = releaseOf[at].label;
+    driver->state->releaseCurrent = releaseOf[at].index;
+  }
+
+  scope = was;
+}
+
 /** One migration, one direction, one transaction. */
 static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
@@ -468,12 +581,16 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
     return -1;
 
   bool pending = false;
+  json_t jobs = jobsOf(driver);
 
   for (size_t i = 0; i < total && !pending; ++i)
     pending = inScope(migrations[i].name) &&
               !hasRun(names, migrations[i].name) &&
+              !inBackground(jobs, migrations[i].name) &&
               (destination == NULL ||
                towards(migrations[i].name, destination) <= 0);
+
+  jobs.release();
 
   if (pending && !takeLock(driver, &names)) {
     names.release();
@@ -486,6 +603,10 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
 
   releasesOf(driver, names);
 
+  /* read again, under the lock */
+  jobs = jobsOf(driver);
+  defer jobs.release();
+
   for (size_t i = 0; i < total && (count == 0 || done < count); ++i) {
 
     if (!inScope(migrations[i].name) || hasRun(names, migrations[i].name))
@@ -495,8 +616,16 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
     if (destination != NULL && towards(migrations[i].name, destination) > 0)
       break;
 
-    if (enterRelease(driver, &migrations[i], false) ||
-        step(driver, &migrations[i], UP))
+    if (inBackground(jobs, migrations[i].name)) {
+      dbmSay(stdout, TEXT`[INFO] [migration] ${shown(migrations[i].name)} is running in the background\n`);
+      continue;
+    }
+
+    if (enterRelease(driver, &migrations[i], false))
+      return -1;
+
+    if (migrations[i].background ? registered(driver, &migrations[i])
+                                 : step(driver, &migrations[i], UP))
       return -1;
 
     ++done;
@@ -544,7 +673,10 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   if (!ready)
     return -1;
 
-  bool pending = false;
+  json_t jobs = jobsOf(driver);
+  bool pending = jobs.get("jobs").count() > 0;
+
+  jobs.release();
 
   for (int i = names.count() - 1; i >= 0 && !pending; --i)
     pending = inScope(names[i].name) &&
@@ -560,6 +692,52 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   defer giveLock(driver);
 
   releasesOf(driver, names);
+
+  /* the jobs first, still running: they are the newest, the last first */
+  jobs = jobsOf(driver);
+  defer jobs.release();
+
+  json_t list = jobs.get("jobs");
+  int jobCount = list.count();
+  const char **keys = calloc((size_t)jobCount + 1, sizeof(char *));
+  defer free(keys);
+
+  for (int i = 0; keys != NULL && i < jobCount; ++i)
+    keys[i] = list.keyAt(i);
+
+  for (int i = 0; keys != NULL && i < jobCount; ++i)
+    for (int j = i + 1; j < jobCount; ++j)
+      if (strcmp(keys[j], keys[i]) > 0) {
+        const char *swap = keys[i];
+        keys[i] = keys[j];
+        keys[j] = swap;
+      }
+
+  for (int i = 0; keys != NULL && i < jobCount && (count == 0 || done < count);
+       ++i) {
+
+    const dbm_migration_t *migration = ofJob(keys[i]);
+    char why[600] = "";
+
+    if (destination != NULL && towards(keys[i], destination) <= 0)
+      break;
+
+    if (migration == NULL) {
+      dbmSay(stderr, TEXT`[ERROR] The migration of the background job "${keys[i]}" is missing, it can not be reverted\n`);
+      return -1;
+    }
+
+    dbmSay(stdout, TEXT`[INFO] [migration] reverting the background job of ${keys[i]}\n`);
+
+    if (!driver->dryRun &&
+        (dbmDownDml(driver, driver->state, migration, why, sizeof why) ||
+         dbmJobsRemove(driver->state, keys[i], why, sizeof why))) {
+      dbmSay(stderr, TEXT`[ERROR] ${keys[i]}: ${why}\n`);
+      return -1;
+    }
+
+    ++done;
+  }
 
   for (int i = names.count() - 1; i >= 0 && (count == 0 || done < count);
        --i) {
