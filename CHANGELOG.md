@@ -1,3 +1,60 @@
+## 0.6.0 (2026-10-10)
+
+What node db-migrate added from 1.1.0 to 1.8.0, followed.
+
+### Features
+
+* **v2:** `db->adopt()` declares objects made outside v2 migrations;
+  dropping one the schema does not know is refused with node's words, or
+  done with `{ irreversible: true }`, which down refuses and a failure does
+  not roll back
+* **scope:** `all` runs the top level and every scope, nested ones too; a
+  scope's `config.json` switches the database or schema, or connects on its
+  own with its own lock and state; PostgreSQL takes `schema` as search_path
+* **config:** `{"ENV": "X", "default": ...}` at any depth, `defaultEnv`
+  too; rc files - `.db-migraterc` from here upwards, `~/.db-migraterc`,
+  `/etc`, `$config`, `db-migrate_<key>` variables - JSON or INI;
+  `--ignore-completed-migrations` does what it does in node
+* **v1:** `DBM_MIGRATION_NO_TRANSACTION` and `DBM_MIGRATION_WITH(up, down,
+  {transactions: false})` run a migration without a transaction
+* **seed:** static seeds in `seeds/*.c`: `seed [name]`, `seed down [name]`,
+  `seed reset`, their rows flagged and remembered in `__dbmigrate_seeds__`
+* **dml:** data migrations, `DBM_MIGRATION_DML`: insert, update, delete in
+  copy or soft mode, purge, runSql with its revert, dropBackups - each step
+  recorded with what reverts it, backups, batches each in a transaction,
+  continued after an interruption, rolled back after a failure
+* **work:** background migrations, `{background: true}`, registered as jobs
+  by up and run by `migrate work` (`--parallel`, `--pause`, `--batch`,
+  `--interval`, `--job-timeout`, `--watch`), paused while migrations run,
+  reverted first by down; `dbmWork` and `dbmWorkStop` for a program
+* **release:** releases, `db->deprecateTable`, `db->deprecateColumn`,
+  `db->dropDeprecated`; renamed with the next release, dropped after
+  `releases` of them; soft deleted rows purged and backups dropped when due;
+  `fix` learns the releases again
+* **status:** `migrate status`, `dbmStatus`: pending, release, lock, jobs,
+  and what is deprecated or due
+* **abi:** `DBM_ABI` - a program built against other headers fails to link
+  instead of misreading a struct; the SBOM names it as `db-migrate:abi`,
+  and meta's runtime ABI as `meta:runtime-abi`
+
+### Bug Fixes
+
+* **state:** the lock's heartbeat and the migration no longer use the state's
+  connection at the same time - with a short `--lock-interval` PostgreSQL
+  said "another command is already in progress" and MySQL's client crashed
+* **v2:** `changeColumn` is undone to the column exactly as it was
+
+Where node has a bug the data or the state would feel, this does what node
+meant: a soft delete's mark `#1` is not found in `#10`; a flag MySQL would cut
+off is refused; a background job recovered by rolling back keeps its record,
+one recorded already is not run twice, one of a scope runs in its scope;
+`work --dry-run` works.
+
+### ⚠ Requirements
+
+* meta `9bcdd6b` or newer: `json_t` documents are mutable, and the runtime
+  has its ABI number
+
 ## 0.5.0 (2026-10-09)
 
 ### Build
