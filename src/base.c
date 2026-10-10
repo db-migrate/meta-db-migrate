@@ -1164,6 +1164,65 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row) {
   return answer;
 }
 
+int dbmQueryParams(driver_t *self, const char *text, json_t params,
+                   json_t *rows, bool read) {
+
+  char *copy = strdup(text);
+  defer free(copy);
+
+  const char *[] chunks;
+  sql_value_t[] values;
+  texts_t texts;
+
+  defer chunks.release();
+  defer values.release();
+  defer texts.release();
+
+  if (copy == NULL)
+    return dbmFail(self, TEXT`out of memory writing a statement`);
+
+  /* every ?, as node's pg driver counts them */
+  chunks.push(copy);
+
+  for (char *mark = strchr(copy, '?'); mark != NULL;
+       mark = strchr(mark + 1, '?')) {
+    *mark = '\0';
+    chunks.push(mark + 1);
+  }
+
+  int given = params.node != NULL && strcmp(params.kind(), "array") == 0
+                  ? params.count()
+                  : 0;
+
+  /* no parameters, nothing back: sent as it is - MySQL prepares no BEGIN */
+  if (chunks.count == 1 && rows == NULL && !read) {
+    dbm_text_t plain = {0};
+    plain.put(text);
+    int sent = dbmSend(self, &plain);
+    plain.release();
+    return sent;
+  }
+
+  for (size_t i = 0; i + 1 < chunks.count; ++i)
+    values.push((int)i < given ? parameterOf(params.at((int)i), &texts) : sqlNothing());
+
+  sql_t query = SQL(chunks.items, chunks.count, values.items, values.count);
+  bool dry = self->dryRun;
+
+  if (read)
+    self->dryRun = false;
+
+  int answer = dbmQuery(self, &query, rows);
+
+  self->dryRun = dry;
+  query.release();
+
+  for (text in texts)
+    free(*text);
+
+  return answer;
+}
+
 /* ------------------------------------------------------------------ */
 /* databases                                                          */
 /* ------------------------------------------------------------------ */

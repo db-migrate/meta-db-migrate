@@ -125,10 +125,16 @@ static int stepV2(driver_t *driver, const dbm_migration_t *migration,
     return -1;
   }
 
-  int answer =
-      direction == UP
-          ? dbmUpV2(driver, driver->state, migration, why, sizeof why)
-          : dbmDownV2(driver, driver->state, migration, why, sizeof why);
+  int answer;
+
+  if (migration->dml != NULL)
+    answer = direction == UP
+                 ? dbmUpDml(driver, driver->state, migration, why, sizeof why)
+                 : dbmDownDml(driver, driver->state, migration, why, sizeof why);
+  else
+    answer = direction == UP
+                 ? dbmUpV2(driver, driver->state, migration, why, sizeof why)
+                 : dbmDownV2(driver, driver->state, migration, why, sizeof why);
 
   if (answer == 0) {
 
@@ -209,7 +215,13 @@ static int step(driver_t *driver, const dbm_migration_t *migration,
   dbmSay(stdout, TEXT`[INFO] ${direction == UP ? "Processing migration"
                                            : "Undoing migration"} ${shown(migration->name)}\n`);
 
-  if (migration->migrate != NULL)
+  /* what node refuses of its _meta, when the migration would run */
+  if (migration->invalid != NULL) {
+    dbmSay(stderr, TEXT`[ERROR] ${migration->invalid}\n`);
+    return -1;
+  }
+
+  if (migration->migrate != NULL || migration->dml != NULL)
     return stepV2(driver, migration, direction);
 
   if (body == NULL && sql == NULL) {
@@ -513,6 +525,11 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
     if (migration == NULL || !dbmLoaded(migration)) {
       dbmSay(stderr, TEXT`[ERROR] ${shown(name)} was run, and this program does not have it\n`);
       return -1;
+    }
+
+    if (migration->dml != NULL) {
+      dbmSay(stdout, TEXT`[INFO] [fix] skipping "${dbmKeyOf(name)}", dml migrations change no schema\n`);
+      continue;
     }
 
     if (migration->migrate == NULL) {

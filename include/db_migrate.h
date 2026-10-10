@@ -298,6 +298,92 @@ const char *schema_t__lastError(schema_t *self);
 int schema_t__fail(schema_t *self, text_t why);
 
 /**
+ * What a dml migration is handed - node's `_meta: {version: 2, type: 'dml'}`.
+ *
+ * A dml migration changes data instead of the schema, and every instruction
+ * is a step recorded with what reverts it, as a v2 migration's are:
+ *
+ *   static int migrate(dml_t *db) {
+ *     db->updateWith("pets", {kind: "dog"}, {kind: "hound"}, {batch: 500});
+ *     db->deleteWith("pets", {kind: "fish"}, {mode: "soft", column: "deleted_at"});
+ *     return db->insert("kinds", [{name: "dog"}, {name: "cat"}]);
+ *   }
+ *
+ *   DBM_MIGRATION_DML(migrate)
+ *
+ * - insert: the rows carry the step in their __dbmigrate__flag column, and
+ *   reverting deletes them again
+ * - update, delete: the rows are copied into a backup table first and
+ *   restored from it; then changed in batches by their key, with the progress
+ *   kept, so an interrupted run continues where it stopped
+ * - delete in soft mode: the rows stay, with the time in a column of yours
+ *   and a mark in their flag; purge deletes them for good later
+ * - runSql: reverted by the SQL given with {revert: "..."}
+ *
+ * `where` is an object - {status: "old", id: [1, 2], gone: null} - a SQL
+ * text, or [sql, params] with `?` for the parameters. Each step, and each
+ * batch of one, runs in a transaction of its own unless the migration says
+ * {transactions: false}. Anything with {irreversible: true} runs without
+ * being recorded for reverting, and the migration can not be reverted then.
+ */
+typedef struct dml_t dml_t;
+
+typedef int (*dbm_dml_t)(dml_t *db);
+
+/** Rows as objects, an array of them, or {columns, data}. */
+int dml_t__insert(dml_t *self, const char *table, json_t rows);
+int dml_t__insertWith(dml_t *self, const char *table, json_t rows,
+                      json_t options);
+
+/** Column names, and one row of values or an array of them. */
+int dml_t__insertColumns(dml_t *self, const char *table, json_t columns,
+                         json_t values);
+int dml_t__insertColumnsWith(dml_t *self, const char *table, json_t columns,
+                             json_t values, json_t options);
+
+/** Options: batch, key ("id" or ["a", "b"]), irreversible. */
+int dml_t__update(dml_t *self, const char *table, json_t set, json_t where);
+int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
+                      json_t options);
+
+/**
+ * Options: mode "copy" (the default) or "soft"; batch, key, irreversible;
+ * in soft mode column, value (CURRENT_TIMESTAMP by default) and purge - true,
+ * or {releases, drop} - for purging the rows with a later release.
+ */
+int dml_t__delete(dml_t *self, const char *table, json_t where);
+int dml_t__deleteWith(dml_t *self, const char *table, json_t where,
+                      json_t options);
+
+/**
+ * The rows deleted in soft mode, deleted for good: by the migration named,
+ * or by all of them with NULL. It can not be reverted. Options: key, batch.
+ */
+int dml_t__purge(dml_t *self, const char *table, const char *migration);
+int dml_t__purgeWith(dml_t *self, const char *table, const char *migration,
+                     json_t options);
+
+/** {revert: "sql"} or {revert: ["sql", [params]]}, or {irreversible: true}. */
+int dml_t__runSql(dml_t *self, const char *sql, json_t options);
+
+/** The same with parameters, `?` in the SQL. */
+int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
+                      json_t options);
+
+/**
+ * The backups of update and delete dropped: of the migrations they are due
+ * for, or of the one named, due or not. Those migrations can not be
+ * reverted afterwards, and neither can this one.
+ */
+int dml_t__dropBackups(dml_t *self, const char *migration);
+
+/** Reading is no step: rows as objects. */
+json_t dml_t__all(dml_t *self, sql_t query);
+
+int dml_t__fail(dml_t *self, text_t why);
+bool dml_t__hasFailed(dml_t *self);
+
+/**
  * Makes a migration that is known only by its file into one that can run -
  * the launcher compiles it and opens it, and its DBM_MIGRATION fills in `up`
  * and `down`. Answers whether that worked, having said why when it did not.
@@ -337,6 +423,18 @@ typedef struct {
    * carries on after them, "rollback" undoes them and runs it again.
    */
   const char *recovery;
+
+  /** A dml migration: one function, and every step records its revert. */
+  dbm_dml_t dml;
+
+  /** node's `_meta.release`: the label of the release it starts, or NULL. */
+  const char *release;
+
+  /** node's `_meta.background`, for a dml migration run by `work`. */
+  bool background;
+
+  /** What is wrong with its `_meta`, said when it would run, or NULL. */
+  const char *invalid;
 } dbm_migration_t;
 
 /**
@@ -466,6 +564,41 @@ void dbmRegisterV2Recovering(const char *file, dbm_v2_t migrate,
 #define DBM_MIGRATION_V2_RECOVERY(migrate, recovery)                           \
   __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
     dbmRegisterV2Recovering(__FILE__, migrate, recovery);                      \
+  }
+
+void dbmRegisterDml(const char *file, dbm_dml_t migrate);
+
+#define DBM_MIGRATION_DML(migrate)                                             \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterDml(__FILE__, migrate);                                         \
+  }
+
+/**
+ * What node's `_meta` says besides the version, given as an object to a
+ * migration registered already: release, recovery, transactions, background
+ * and type. The _WITH forms below are the way to say it:
+ *
+ *   DBM_MIGRATION_V2_WITH(migrate, {release: "r2", recovery: "rollback"})
+ *   DBM_MIGRATION_DML_WITH(migrate, {transactions: false})
+ */
+void dbmRegisterMeta(const char *file, json_t meta);
+
+#define DBM_MIGRATION_WITH(up, down, ...)                                      \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegister(__FILE__, up, down);                                           \
+    dbmRegisterMeta(__FILE__, __VA_ARGS__);                                    \
+  }
+
+#define DBM_MIGRATION_V2_WITH(migrate, ...)                                    \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterV2(__FILE__, migrate);                                          \
+    dbmRegisterMeta(__FILE__, __VA_ARGS__);                                    \
+  }
+
+#define DBM_MIGRATION_DML_WITH(migrate, ...)                                   \
+  __attribute__((constructor)) static void dbmRegisterThisFile__(void) {     \
+    dbmRegisterDml(__FILE__, migrate);                                         \
+    dbmRegisterMeta(__FILE__, __VA_ARGS__);                                    \
   }
 
 /* ------------------------------------------------------------- drivers */

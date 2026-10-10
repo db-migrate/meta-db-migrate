@@ -1365,7 +1365,7 @@ static int undoAll(schema_t *self) {
 /* ------------------------------------------------------------------ */
 
 /** The key node keeps a migration's record under: its file name, nothing else. */
-static const char *keyOf(const char *name) {
+const char *dbmKeyOf(const char *name) {
 
   const char *slash = strrchr(name, '/');
 
@@ -1373,7 +1373,7 @@ static const char *keyOf(const char *name) {
 }
 
 /** The record as stored, or a new one - `{}` is what node stores at first. */
-static yyjson_mut_doc *recordFrom(const char *text) {
+yyjson_mut_doc *dbmRecordFrom(const char *text) {
 
   yyjson_doc *read = text != NULL ? yyjson_read(text, strlen(text), 0) : NULL;
   yyjson_mut_doc *doc = read != NULL ? yyjson_doc_mut_copy(read, NULL)
@@ -1431,7 +1431,7 @@ static void keepExecuted(schema_t *self, long done, long failed,
 }
 
 /** The file a migration was written in, hashed - node's `h` - or NULL. */
-static const char *hashOf(const dbm_migration_t *migration, char hex[65]) {
+const char *dbmHashOf(const dbm_migration_t *migration, char hex[65]) {
   return migration->file[0] != '\0' && dbmSha256File(migration->file, hex)
              ? hex
              : NULL;
@@ -1447,7 +1447,7 @@ static const char *recoveryOf(const dbm_migration_t *migration,
                               const dbm_interrupted_t *interrupted, char *why,
                               size_t room) {
 
-  const char *name = keyOf(migration->name);
+  const char *name = dbmKeyOf(migration->name);
   const char *mode = migration->recovery != NULL ? migration->recovery : "skip";
 
   if (!(mode in {"skip", "rollback"})) {
@@ -1535,11 +1535,11 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
             const dbm_migration_t *migration, char *why, size_t room) {
 
   const char *name = migration->name;
-  schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun, .name = keyOf(name)};
+  schema_t db = {.driver = driver, .state = state, .key = dbmKeyOf(name),
+                 .dry = driver->dryRun, .name = dbmKeyOf(name)};
   dbm_interrupted_t interrupted = {0};
   char hex[65];
-  const char *hash = hashOf(migration, hex);
+  const char *hash = dbmHashOf(migration, hex);
   char *stored = db.dry ? NULL
                         : dbmStateBegin(state, db.key, "up", hash, &interrupted);
 
@@ -1548,7 +1548,7 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
     return -1;
   }
 
-  db.record = recordFrom(stored);
+  db.record = dbmRecordFrom(stored);
   free(stored);
 
   if (interrupted.found) {
@@ -1581,7 +1581,7 @@ int dbmUpV2(driver_t *driver, dbm_state_t *state,
         return -1;
       }
 
-      db.record = recordFrom(stored);
+      db.record = dbmRecordFrom(stored);
       free(stored);
     } else {
       db.recovery = &interrupted;
@@ -1650,13 +1650,13 @@ int dbmFixV2(driver_t *driver, dbm_state_t *state,
              const dbm_migration_t *migration, char *why, size_t room) {
 
   const char *name = migration->name;
-  schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun, .fixing = true, .name = keyOf(name)};
+  schema_t db = {.driver = driver, .state = state, .key = dbmKeyOf(name),
+                 .dry = driver->dryRun, .fixing = true, .name = dbmKeyOf(name)};
 
   if (!db.dry) {
 
     char hex[65];
-    char *stored = dbmStateBegin(state, db.key, "fix", hashOf(migration, hex),
+    char *stored = dbmStateBegin(state, db.key, "fix", dbmHashOf(migration, hex),
                                  NULL);
 
     if (stored == NULL) {
@@ -1667,7 +1667,7 @@ int dbmFixV2(driver_t *driver, dbm_state_t *state,
     free(stored);
   }
 
-  db.record = recordFrom(NULL);
+  db.record = dbmRecordFrom(NULL);
 
   int answer = migration->migrate(&db);
 
@@ -1694,8 +1694,8 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state,
               const dbm_migration_t *migration, char *why, size_t room) {
 
   const char *name = migration->name;
-  schema_t db = {.driver = driver, .state = state, .key = keyOf(name),
-                 .dry = driver->dryRun, .unlearn = true, .name = keyOf(name)};
+  schema_t db = {.driver = driver, .state = state, .key = dbmKeyOf(name),
+                 .dry = driver->dryRun, .unlearn = true, .name = dbmKeyOf(name)};
   char *stored = NULL;
 
   if (dbmKvGet(state->db, state->table, db.key, &stored)) {
@@ -1716,7 +1716,7 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state,
   if (!db.dry) {
 
     char hex[65];
-    char *begun = dbmStateBegin(state, db.key, "down", hashOf(migration, hex),
+    char *begun = dbmStateBegin(state, db.key, "down", dbmHashOf(migration, hex),
                                 NULL);
 
     if (begun == NULL) {
@@ -1728,7 +1728,7 @@ int dbmDownV2(driver_t *driver, dbm_state_t *state,
     free(begun);
   }
 
-  db.record = recordFrom(stored);
+  db.record = dbmRecordFrom(stored);
   free(stored);
 
   char irreversible[600];

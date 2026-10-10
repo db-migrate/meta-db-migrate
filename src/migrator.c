@@ -330,6 +330,79 @@ void dbmRegisterV2(const char *file, dbm_v2_t migrate) {
   dbmRegisterV2Recovering(file, migrate, NULL);
 }
 
+void dbmRegisterDml(const char *file, dbm_dml_t migrate) {
+
+  dbm_migration_t entry;
+
+  memset(&entry, 0, sizeof entry);
+
+  if (!nameOf(file, entry.name, sizeof entry.name))
+    return;
+
+  dbm_migration_t *known = migrationNamed(entry.name);
+
+  if (known != NULL) {
+    known->dml = migrate;
+    return;
+  }
+
+  entry.dml = migrate;
+  migrations.push(entry);
+}
+
+/** A text kept for as long as the program runs - the entries move. */
+static const char *kept(const char *text) {
+  return text != NULL ? strdup(text) : NULL;
+}
+
+void dbmRegisterMeta(const char *file, json_t meta) {
+
+  char name[256];
+
+  if (!nameOf(file, name, sizeof name) || migrationNamed(name) == NULL)
+    return;
+
+  dbm_migration_t *entry = migrationNamed(name);
+  const char *shownName = strrchr(entry->name, '/') != NULL
+                              ? strrchr(entry->name, '/') + 1
+                              : entry->name;
+  json_t release = meta.get("release");
+  json_t type = meta.get("type");
+  char why[600] = "";
+
+  /* node's labels are anything, said as text: 2 is "2" */
+  if (strcmp(release.kind(), "string") == 0)
+    entry->release = kept(release.text());
+  else if (strcmp(release.kind(), "number") == 0) {
+    char number[64];
+    dbmWrite(number, sizeof number, TEXT`${(long long)release.number()}`);
+    entry->release = kept(number);
+  }
+
+  if (strcmp(meta.get("recovery").kind(), "string") == 0)
+    entry->recovery = kept(meta.get("recovery").text());
+
+  if (strcmp(meta.get("transactions").kind(), "bool") == 0 &&
+      !meta.get("transactions").truth())
+    entry->noTransaction = true;
+
+  entry->background = strcmp(meta.get("background").kind(), "bool") == 0 &&
+                      meta.get("background").truth();
+
+  /* what node refuses when the migration runs, refused then here too */
+  if (strcmp(type.kind(), "nothing") != 0 &&
+      !(strcmp(type.kind(), "string") == 0 &&
+        strcmp(type.text(), "dml") == 0))
+    dbmWrite(why, sizeof why, TEXT`Invalid migration type "${strcmp(type.kind(), "string") == 0 ? type.text() : "?"}" in migration "${shownName}", use dml or leave it out for a schema migration`);
+  else if (strcmp(type.kind(), "string") == 0 && entry->dml == NULL)
+    dbmWrite(why, sizeof why, TEXT`Migration "${shownName}" says type "dml", register it with DBM_MIGRATION_DML_WITH`);
+  else if (entry->background && entry->dml == NULL)
+    dbmWrite(why, sizeof why, TEXT`Migration "${shownName}" runs in the background, which only dml migrations can, register it with DBM_MIGRATION_DML_WITH`);
+
+  if (why[0] != '\0')
+    entry->invalid = kept(why);
+}
+
 void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
 
   dbm_migration_t entry;
@@ -352,7 +425,7 @@ bool dbmLoaded(const dbm_migration_t *migration) {
 
   if (migration->load == NULL || migration->up != NULL ||
       migration->down != NULL || migration->upSql != NULL ||
-      migration->migrate != NULL)
+      migration->migrate != NULL || migration->dml != NULL)
     return true;
 
   if (!migration->load(migration->file, migration->name))
@@ -360,7 +433,8 @@ bool dbmLoaded(const dbm_migration_t *migration) {
 
   /* its DBM_MIGRATION filled this very entry in, if the name agreed */
   if (migration->up == NULL && migration->down == NULL &&
-      migration->upSql == NULL && migration->migrate == NULL) {
+      migration->upSql == NULL && migration->migrate == NULL &&
+      migration->dml == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${migration->file} was loaded and registered nothing - it needs a DBM_MIGRATION(up, down)\n`);
     return false;
   }

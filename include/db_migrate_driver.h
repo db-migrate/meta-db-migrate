@@ -269,6 +269,15 @@ int dbmBaseAddForeignKey(driver_t *self, const char *table,
 int dbmBaseRemoveForeignKey(driver_t *self, const char *table,
                             const char *name);
 int dbmBaseInsert(driver_t *self, const char *table, json_t row);
+
+/**
+ * A statement written with `?` for its parameters - node's runSql(sql,
+ * params) - and the parameters as a JSON array, or nothing with `.node`
+ * NULL. A `read` runs in a dry run as well: what is read decides what would
+ * be written.
+ */
+int dbmQueryParams(driver_t *self, const char *text, json_t params,
+                   json_t *rows, bool read);
 int dbmBaseCreateDatabase(driver_t *self, const char *name, bool ifNotExists);
 int dbmBaseDropDatabase(driver_t *self, const char *name, bool ifExists);
 
@@ -334,6 +343,16 @@ typedef struct dbm_state_t {
   /** The schema the v2 migrations built: `{i, c, f, e}`, as JSON. */
   void *schema;
 
+  /**
+   * The release the running migration belongs to, as node's internals have
+   * it: its label (NULL for release 0), its index, every label's index as a
+   * JSON object, and the project's `deprecation` options as JSON, or NULL.
+   */
+  const char *releaseLabel;
+  long releaseCurrent;
+  const char *releaseIndex;
+  const char *deprecation;
+
   /** The statements on `db`, one at a time - what `db->serial` points at. */
   pthread_mutex_t statements;
 
@@ -395,6 +414,21 @@ char *dbmStateBegin(dbm_state_t *self, const char *key, const char *op,
                     const char *hash, dbm_interrupted_t *interrupted);
 int dbmStateSave(dbm_state_t *self, const char *key, const char *migration);
 int dbmStateForget(dbm_state_t *self, const char *key);
+
+/** The key of a migration's record: its file name, without a scope. */
+const char *dbmKeyOf(const char *name);
+
+/** A record as stored, `{i, c, f, s}` filled in, or a new one. */
+yyjson_mut_doc *dbmRecordFrom(const char *text);
+
+/** The file a migration was written in, hashed - node's `h` - or NULL. */
+const char *dbmHashOf(const dbm_migration_t *migration, char hex[65]);
+
+/** dml migrations, recorded and reverted the way node does it. */
+int dbmUpDml(driver_t *driver, dbm_state_t *state,
+             const dbm_migration_t *migration, char *why, size_t room);
+int dbmDownDml(driver_t *driver, dbm_state_t *state,
+               const dbm_migration_t *migration, char *why, size_t room);
 
 /** v2 migrations, learned and undone the way node does it. */
 int dbmUpV2(driver_t *driver, dbm_state_t *state,
