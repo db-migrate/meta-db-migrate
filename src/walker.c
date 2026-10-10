@@ -20,6 +20,13 @@ typedef enum direction { UP, DOWN } direction_t;
  * The names already run, with the table they are kept in made first - and
  * whether that worked, beside them rather than through a pointer.
  */
+/** `--ignore-completed-migrations`: what ran is not read, as in node. */
+static bool ignoreCompleted;
+
+void dbmIgnoreCompleted(bool ignore) {
+  ignoreCompleted = ignore;
+}
+
 static json_t, bool loaded(driver_t *driver) {
 
   json_t names = {0};
@@ -28,6 +35,9 @@ static json_t, bool loaded(driver_t *driver) {
     dbmSay(stderr, TEXT`[ERROR] could not create the migrations table: ${driver->error}\n`);
     return names, false;
   }
+
+  if (ignoreCompleted)
+    return meta_toJSON("[]"), true;
 
   if (driver->loadedMigrations(driver, &names)) {
     dbmSay(stderr, TEXT`[ERROR] could not read the migrations table: ${driver->error}\n`);

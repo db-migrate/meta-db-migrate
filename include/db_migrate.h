@@ -656,6 +656,15 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun);
  * directory under it otherwise - what `up:billing` names.
  */
 void dbmUseScope(const char *scope);
+
+/** `--ignore-completed-migrations`: every command as if nothing had run. */
+void dbmIgnoreCompleted(bool ignore);
+
+/**
+ * node's rc files merged - /etc, ~, the first .db-migraterc from here
+ * upwards, $config, db-migrate_* variables - as one object. Never released.
+ */
+json_t dbmRunControl(void);
 int dbmCheck(driver_t *driver);
 
 /**
@@ -669,6 +678,12 @@ typedef struct {
   long lockTimeout;
   long lockInterval;
   bool verbose;
+
+  /**
+   * node's `deprecation` for the releases, as JSON - {"releases": 2,
+   * "drop": "auto"} - or NULL for node's defaults, 4 releases, by hand.
+   */
+  const char *deprecation;
 } dbm_options_t;
 
 /**

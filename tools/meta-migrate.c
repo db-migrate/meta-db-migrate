@@ -801,8 +801,14 @@ int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "embed-sql") == 0)
     return embedSql(argv[2], argv[3]);
 
-  const char *dir = "migrations";
-  const char *seedsDir = "seeds";
+  /* where they are as .db-migraterc says it, the command line over it */
+  json_t rc = dbmRunControl();
+  const char *dir = strcmp(rc.get("migrations-dir").kind(), "string") == 0
+                        ? rc.get("migrations-dir").text()
+                        : "migrations";
+  const char *seedsDir = strcmp(rc.get("seeds-dir").kind(), "string") == 0
+                             ? rc.get("seeds-dir").text()
+                             : "seeds";
   const char *command = NULL;
   bool asking = false;
 

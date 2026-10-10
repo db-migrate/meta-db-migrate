@@ -120,8 +120,48 @@ expect "--log-level sql shows them" 1 \
   "$("$meta" down --dry-run --log-level sql 2>&1 | grep -c '^drop table legacy;')"
 expect "--log-level info keeps -v from printing [SQL]" "0 1" \
   "$("$meta" down -v --log-level info 2>&1 | grep -c '^\[SQL\]') $("$meta" up -v --log-level info 2>&1 | grep -c '^\[INFO\] Done')"
-expect "--ignore-completed-migrations is taken, as node takes it" 0 \
-  "$("$meta" check --ignore-completed-migrations >/dev/null 2>&1; echo $?)"
+expect "--ignore-completed-migrations: as if nothing had run" 1 \
+  "$("$meta" check --ignore-completed-migrations 2>&1 | grep -c 'Pending: .*-legacy')"
+
+# ----------------------------------------------------------- rc files
+
+mkdir -p rc/db/migrations rc/deep/er
+cd rc
+echo '{"dev": {"driver": "sqlite3", "filename": "rc.db"}}' >database.json
+cat >db/migrations/20261010000001-one.c <<'EOF'
+#include <db_migrate.h>
+static int up(migrator_t *db) { return db->runSql("CREATE TABLE one (id int)"); }
+static int down(migrator_t *db) { return db->runSql("DROP TABLE one"); }
+DBM_MIGRATION(up, down)
+EOF
+cat >.db-migraterc <<'EOF'
+{
+  // where they are, and what the history is called
+  "migrations-dir": "db/migrations", /* node's names */
+  "table": "history"
+}
+EOF
+"$meta" up >/dev/null 2>&1
+expect "a .db-migraterc in JSON, with comments, sets the options" "history one" \
+  "$(sqlite3 rc.db "select group_concat(name, ' ') from (select name from sqlite_master where name in ('history', 'one') order by name)")"
+(cd deep/er && "$meta" check --config ../../database.json -m ../../db/migrations 2>&1) >deep.out
+expect "and is found from below, its paths from where it runs, as node's" 1 \
+  "$(sqlite3 deep/er/rc.db "select count(*) from sqlite_master where name = 'history'")"
+expect "the command line wins over it" 1 \
+  "$("$meta" check -m nowhere 2>&1 | grep -c 'no migrations directory\|0 migration(s) to run\|nowhere')"
+printf '; INI\nmigrations-dir = db/migrations\ntable = ledger\n' >.db-migraterc
+"$meta" up --ignore-completed-migrations >/dev/null 2>&1
+expect "INI is read too" 1 \
+  "$(sqlite3 rc.db "select count(*) from sqlite_master where name = 'ledger'")"
+rm .db-migraterc
+printf '{"migrations-dir": "db/migrations", "table": "elsewhere"}' >other.rc
+config=other.rc "$meta" check >/dev/null 2>&1
+expect "and the file \$config names" 1 \
+  "$(sqlite3 rc.db "select count(*) from sqlite_master where name = 'elsewhere'")"
+env 'db-migrate_migrations-dir=db/migrations' 'db-migrate_table=byvariable' "$meta" check >/dev/null 2>&1
+expect "and db-migrate_<key> variables" 1 \
+  "$(sqlite3 rc.db "select count(*) from sqlite_master where name = 'byvariable'")"
+cd ..
 
 cd "$here"
 echo "$failed failed"

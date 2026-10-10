@@ -41,6 +41,12 @@ typedef struct {
   const char *dir;
   const char *name;
 
+  /** The project's `deprecation` from an rc file, as JSON, or NULL. */
+  const char *deprecation;
+
+  /** `--ignore-completed-migrations`: as if nothing had run. */
+  bool ignoreCompleted;
+
   /** `seed down pets`: the seed after down or reset. */
   const char *second;
   size_t count;
@@ -111,6 +117,12 @@ options:
   --ignore-on-init            create: an up that is skipped when run with it;
                               up: record those without running them
   --log-level LEVELS          what is printed: info|warn|error|sql
+  --ignore-completed-migrations   as if no migration had run yet
+  --seeds-dir DIR             where seeds are (seeds)
+
+  The options can be kept in a .db-migraterc, as JSON or INI, found from
+  here upwards, or in ~/.db-migraterc - node's names, migrations-dir,
+  lock-timeout, and "deprecation" for the releases.
   --template NAME             create: what the plugin of that name writes
   -i, --version               print the version
   -h, --help                  this
@@ -123,7 +135,81 @@ static int usage(void) {
   return 2;
 }
 
+/** A value of an rc file as an option's text: a number is written as one. */
+static const char *rcText(json_t value, char *into, size_t room) {
+
+  if (strcmp(value.kind(), "string") == 0)
+    return value.text();
+
+  if (strcmp(value.kind(), "number") == 0) {
+    dbmWrite(into, room, TEXT`${(long long)value.number()}`);
+    return into;
+  }
+
+  return NULL;
+}
+
+static bool rcTruth(json_t value) {
+  return (strcmp(value.kind(), "bool") == 0 && value.truth()) ||
+         (strcmp(value.kind(), "string") == 0 &&
+          strcmp(value.text(), "true") == 0);
+}
+
+/** What .db-migraterc and the rest say, before the command line says more. */
+static json_t runControl;
+static char rcTexts[8][64];
+static char *rcDeprecation;
+
+static void readRunControl(options_t *into) {
+
+  /* kept for as long as the options point into it */
+  runControl = dbmRunControl();
+
+  json_t rc = runControl;
+  const char *text;
+
+  /* the short name wins, as node's aliases have it */
+  json_t table = !rc.get("table").isNothing() ? rc.get("table")
+                                              : rc.get("migration-table");
+  json_t state = !rc.get("state").isNothing() ? rc.get("state")
+                                              : rc.get("state-table");
+
+  if ((text = rcText(rc.get("env"), rcTexts[0], 64)) != NULL)
+    into->env = text;
+  if ((text = rcText(rc.get("configFile"), rcTexts[1], 64)) != NULL)
+    into->config = text;
+  if ((text = rcText(rc.get("migrations-dir"), rcTexts[2], 64)) != NULL)
+    into->dir = text;
+  if ((text = rcText(table, rcTexts[3], 64)) != NULL)
+    into->table = text;
+  if ((text = rcText(state, rcTexts[4], 64)) != NULL)
+    into->stateTable = text;
+  if ((text = rcText(rc.get("lock-timeout"), rcTexts[5], 64)) != NULL)
+    into->lockTimeout = strtol(text, NULL, 10);
+  if ((text = rcText(rc.get("lock-interval"), rcTexts[6], 64)) != NULL)
+    into->lockInterval = strtol(text, NULL, 10);
+  if ((text = rcText(rc.get("log-level"), rcTexts[7], 64)) != NULL)
+    into->logLevel = text;
+
+  into->verbose = rcTruth(rc.get("verbose"));
+  into->noTransactions = rcTruth(rc.get("non-transactional"));
+  into->sqlFile = rcTruth(rc.get("sql-file"));
+  into->ignoreOnInit = rcTruth(rc.get("ignore-on-init"));
+  into->ignoreCompleted = rcTruth(rc.get("ignore-completed-migrations"));
+
+  if (strcmp(rc.get("deprecation").kind(), "object") == 0) {
+    char *written = yyjson_mut_val_write(rc.get("deprecation").node, 0, NULL);
+    char *old = rcDeprecation;
+
+    rcDeprecation = written;
+    free(old);
+    into->deprecation = rcDeprecation;
+  }
+}
+
 static bool readOptions(int argc, char **argv, options_t *into) {
+
+  readRunControl(into);
 
   for (int i = 1; i < argc; ++i) {
 
@@ -171,9 +257,8 @@ static bool readOptions(int argc, char **argv, options_t *into) {
       into->ignoreOnInit = true;
     else if (strcmp(word, "--log-level") == 0 && hasNext)
       into->logLevel = argv[++i];
-    /* node reads it into a setting nothing looks at; taken, so scripts work */
     else if (strcmp(word, "--ignore-completed-migrations") == 0)
-      ;
+      into->ignoreCompleted = true;
     else if (strcmp(word, "--template") == 0 && hasNext)
       into->template = argv[++i];
     /* the launcher reads it; a program has its seeds compiled in */
@@ -694,6 +779,9 @@ static driver_t *connected(json_t config, const dbm_options_t *options,
       options->stateTable != NULL ? options->stateTable : "migrations_state",
       options->lockTimeout, options->lockInterval, readOnly);
 
+  if (driver->state != NULL)
+    driver->state->deprecation = options->deprecation;
+
   if (driver->state == NULL) {
     dbmWrite(why, room, TEXT`could not open the state table: ${(*stateDriver)->error}`);
     dbmClose(*stateDriver);
@@ -874,6 +962,7 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
       .lockTimeout = options->lockTimeout,
       .lockInterval = options->lockInterval,
       .verbose = options->verbose,
+      .deprecation = options->deprecation,
   };
   driver_t *stateDriver;
   driver_t *driver = connected(
@@ -965,6 +1054,7 @@ int dbmCli(int argc, char **argv) {
   }
 
   dbmUseScope(options.scope);
+  dbmIgnoreCompleted(options.ignoreCompleted);
 
   if (options.version) {
     dbmSay(stdout, TEXT`${DBM_VERSION}\n`);
