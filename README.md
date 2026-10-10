@@ -98,6 +98,127 @@ Or plain SQL in two files, as node's `create --sql-file` creates them:
 needed next to them. Text containing only comments (the placeholder) does
 nothing.
 
+What node's `_meta` says besides the version goes into the `_WITH` forms:
+
+```c
+DBM_MIGRATION_WITH(up, down, {transactions: false})      /* v1, no transaction */
+DBM_MIGRATION_V2_WITH(migrate, {release: "2.3.0", recovery: "rollback"})
+DBM_MIGRATION_DML_WITH(migrate, {background: true, blocking: true})
+```
+
+### Objects made outside v2 migrations
+
+`db->adopt()` declares a table, column, index or foreign key that a v1
+migration or a person made, without sending anything; v2 migrations then
+treat it as their own, and undoing the migration only forgets it again.
+Dropping something the schema does not know is refused with node's words,
+unless it is asked for with `{irreversible: true}`
+(`db->dropTableWith("junk", {irreversible: true})`): then `down` refuses
+the migration, and a failure after it is not rolled back - the next run
+continues after the steps that ran.
+
+```c
+db->adopt()->createTable("legacy", {id: {type: "int", primaryKey: true}});
+db->addColumn("legacy", "age", {type: "int"});
+```
+
+### Data migrations
+
+A dml migration (node's `_meta: {version: 2, type: 'dml'}`) changes data
+instead of the schema. Every step is recorded with what reverts it, in
+node's records, before it runs:
+
+```c
+static int migrate(dml_t *db) {
+  db->updateWith("pets", {kind: "hound"}, {kind: "dog"}, {batch: 500});
+  db->deleteWith("pets", ["kind = 'fish'"], {});
+  db->deleteWith("pets", {id: [7, 8]}, {mode: "soft", column: "deleted_at",
+                                         purge: true});
+  db->runSql("UPDATE pets SET age = age + 1", {revert: "UPDATE pets SET age = age - 1"});
+  return db->insert("kinds", [{name: "dog"}, {name: "cat"}]);
+}
+
+DBM_MIGRATION_DML(migrate)
+```
+
+- **insert** flags its rows in `__dbmigrate__flag`; reverting deletes them.
+- **update** and **delete** copy the rows into a backup table
+  `__dbm_backup_<hash>` first and restore them from there. They change the
+  rows in batches by their key, each in a transaction; an interrupted run
+  continues after the last batch.
+- **delete in soft mode** sets a column of yours and marks the rows;
+  `db->purge("pets", "<migration>")` deletes them for good later, or a later
+  release does with `purge: {releases: 1, drop: "auto"}`.
+- **where** is an object (`{status: "old", id: [1, 2], gone: null}`), or a
+  SQL text with its parameters as `["kind = ?", ["fish"]]`. A text alone is
+  written `["kind = 'fish'"]`: a bare string is not a document in meta.
+- `{irreversible: true}` runs a step without being able to revert it.
+- ``db->all(SQL`...`)`` reads, and is no step.
+
+Where node's soft delete takes the mark `#1` for part of `#10`, this finds
+only `#1`; on MySQL, whose flag column keeps 255 characters, a soft delete
+that would make a flag longer is refused instead of cut off.
+
+### Background migrations
+
+A dml migration with `{background: true}` is registered by `up` as a job in
+`__dbmigrate_jobs__` instead of being run, and the migrations after it go on.
+`migrate work` runs the jobs:
+
+```
+migrate work --parallel 2 --pause 50 --batch 500 --interval 5000 --job-timeout 60000 --watch
+```
+
+Each slot is a process of its own. A job keeps its progress, stops after its
+batch on SIGINT or SIGTERM and continues with the next run, is taken over
+when its worker stops renewing it for `--job-timeout`, and is rolled back
+when it fails - `up` queues it again. `{blocking: true}` keeps the jobs
+after it waiting. While a process migrates, it pauses the jobs, so
+migrations always go first, and `down` reverts the jobs before the
+migrations. A program runs them with `dbmWork` and stops them with
+`dbmWorkStop`.
+
+Unlike node's worker, a job of a scope runs in its scope, a job recovered by
+rolling back keeps its record, a job whose migration was recorded already is
+forgotten instead of run twice, and `work --dry-run` says what would run.
+
+### Releases
+
+A migration starts a release with `release` in its `_meta`; the ones after it
+without a label belong to it. A v2 migration deprecates what the application
+stops using:
+
+```c
+db->deprecateTableWith("legacy_orders", {releases: 2, drop: "auto"});
+db->deprecateColumn("users", "fax");
+```
+
+With the next release it is renamed to `__dbm_deprecated_<name>_<time>`, so
+whatever still uses it fails while the data is still there. After `releases`
+of them (4) it is dropped - with `drop: "auto"` by itself, otherwise `up`
+says it is due until a migration calls `db->dropDeprecated()`. What a
+release does runs before its first migration and is reverted with it. Soft
+deleted rows are purged and the backups of dml migrations dropped the same
+way. The project's defaults go into `.db-migraterc`:
+`{"deprecation": {"releases": 2, "drop": "auto"}}`.
+
+`migrate status` says what is pending, the release, the lock, the jobs and
+what is deprecated or due, in node's words.
+
+### Seeds
+
+Seeds in `seeds/*.c` insert rows into tables made by v2 migrations; their
+rows are flagged, so `seed` removes them before it inserts them again,
+`seed down [name]` removes them, `seed reset` removes all of them:
+
+```c
+static int seed(seed_t *db) {
+  return db->insert("owners", [{id: 1, name: "Ann"}, {id: 2, name: "Bob"}]);
+}
+
+DBM_SEED(seed)
+```
+
 ## Commands
 
 ```
@@ -106,7 +227,10 @@ down [name]        undo the last one, or everything after name
 sync name          up or down, whichever reaches name
 reset              undo everything
 check              list what would run
+status             what is pending, the release, the lock, the jobs, what is due
 fix                rebuild node's state from the v2 migrations that ran
+work               run the background jobs
+seed [name]        insert the seeds again; seed down [name], seed reset
 create name        a new migration (--sql, --sql-file, --v2-file, --template NAME)
 db:create name     create a database, if it is not there yet
 db:drop name       drop a database, if it is there
@@ -117,8 +241,19 @@ Options as in node: `-e/--env`, `--config`, `-m/--migrations-dir`,
 `-c/--count`, `-t/--table`, `-s/--state-table`, `--lock-timeout`,
 `--lock-interval`, `--backup-state`, `--dry-run`, `--check`, `-v/--verbose`,
 `--non-transactional`, `--sql-file`, `--v2-file`, `--template`,
-`--ignore-on-init`, `--log-level`, `-h`, `-i`. A destination can be
+`--ignore-on-init`, `--ignore-completed-migrations`, `--log-level`,
+`--seeds-dir`, `-h`, `-i`, and for `work` `--parallel`, `--pause`,
+`--batch`, `--interval`, `--job-timeout`, `--watch`. A destination can be
 abbreviated: `up 20261008` runs everything up to that day.
+
+The options can also be kept in rc files, as node reads them since 1.1:
+`/etc/db-migraterc`, `~/.db-migraterc`, the first `.db-migraterc` from the
+working directory upwards, the file `$config` names, and `db-migrate_<key>`
+variables - JSON with comments, or INI. The command line wins over them.
+
+In `database.json`, `{"ENV": "SHOP_PASSWORD", "default": "dev"}` reads a
+variable and falls back to the default when it is not set, at any depth and
+for `defaultEnv` too.
 
 - **`--ignore-on-init`** is for taking over a database that already has what
   the migrations make. `create --sql-file --ignore-on-init` writes
@@ -154,7 +289,13 @@ diagnostic fields (`code`, `detail`, `hint`, ...):
 
 Scopes are subfolders of `migrations/`. Their migrations are recorded as
 `billing/<name>` and those at the top level as `/<name>`, exactly as in node.
-Each command only sees its own scope.
+Each command only sees its own scope; `up:all` and the other commands with
+`all` run the top level and every scope, nested ones too. A scope is a
+folder with migrations in it - unlike node, which counts every folder, an
+empty one is not entered. A scope's `config.json` is laid over the
+environment: one that says only `database` or `schema` switches to it on
+the same connection, one that says more connects on its own and keeps its
+own lock and state there.
 
 ## In a program
 
@@ -361,7 +502,9 @@ META_ROOT=/opt/meta ./build.sh
 `META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
-`plugins.sh`, `static.sh`, `embed.sh`, `recovery.sh` and `compat.sh`. The last one moves a project from node
+`plugins.sh`, `static.sh`, `embed.sh`, `recovery.sh`, `adopt.sh`,
+`scopes.sh`, `seeds.sh`, `dml.sh`, `releases.sh`, `work.sh` and
+`compat.sh`. The last one moves a project from node
 db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
 
@@ -406,6 +549,11 @@ are permissively licensed.
   run/all/runSql, plus each database's own features (see table)
 - up/down/sync with destinations, reset, check, create (code, SQL, v2,
   templates), scopes, db:create/db:drop, node's options, development launcher
-- v2 migrations, node's state and lock, `fix`, in node's format
+- v2 migrations, node's state and lock, `fix`, in node's format; adopt and
+  irreversible drops
+- what node 1.1 to 1.8 added: scopes with their own database, rc files,
+  defaults for variables, v1 migrations without a transaction, seeds, data
+  migrations, background migrations and `work`, releases and deprecations,
+  `status`
 - plugins: YAML, ssh tunnel, config loaders, tunnels and templates of your own
-- Missing: seeds (not working in node either at the moment), MongoDB
+- Missing: MongoDB
