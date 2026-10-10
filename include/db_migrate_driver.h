@@ -424,6 +424,88 @@ yyjson_mut_doc *dbmRecordFrom(const char *text);
 /** The file a migration was written in, hashed - node's `h` - or NULL. */
 const char *dbmHashOf(const dbm_migration_t *migration, char hex[65]);
 
+/* ------------------------------------------------------------ releases */
+
+/** The key the steps of a release are recorded under, before its label. */
+#define DBM_RELEASE_PREFIX "__dbmigrate_release__:"
+
+/**
+ * { releases, drop } checked as node checks them, and added to `into`, in
+ * that order, unless it is NULL. -1 with node's words for what is wrong.
+ */
+int dbmReleaseOptions(json_t options, yyjson_mut_doc *doc, yyjson_mut_val *into,
+                      char *why, size_t room);
+
+/**
+ * What applies to an entry: node's defaults - 4 releases, dropped by hand -
+ * the project's `deprecation`, then the entry's own `o`.
+ */
+int dbmReleaseSettings(dbm_state_t *state, yyjson_mut_val *given,
+                       long *releases, char drop[8], char *why, size_t room);
+
+/** Releases since the one labelled `release` (NULL: release 0), at `index`. */
+long dbmReleaseAge(dbm_state_t *state, long index, const char *release);
+
+/** A deprecated table or column, as the schema's `d` says and the releases. */
+typedef struct {
+  bool column;
+  char t[256];
+  char c[256];
+
+  /** What it is called now - renamed or not - and what renaming calls it. */
+  char name[256];
+  char to[256];
+  bool renamed;
+
+  /** The release it was deprecated in, and how many have passed since. */
+  char r[256];
+  bool hasRelease;
+  long age;
+
+  long releases;
+  char drop[8];
+} dbm_deprecated_t;
+
+/**
+ * Every deprecation whose table or column is still there, under one name or
+ * the other, at release `index`. -1 when the project's options are wrong.
+ */
+long dbmDeprecations(dbm_state_t *state, long index, dbm_deprecated_t *into,
+                     size_t room, char *why, size_t whyRoom);
+
+/** `__dbm_deprecated_<name>_<time>`, the time of the deprecating migration. */
+void dbmHiddenName(const char *name, const char *migration, char *into,
+                   size_t room);
+
+/**
+ * What is due before the first migration of the release `label`, at
+ * `index`, run as the migration `__dbmigrate_release__:<label>` - or with
+ * `fix`, learned again.
+ */
+int dbmReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
+                    long index, bool fix, char *why, size_t room);
+
+/** -1, in node's words, when what the release ran can not be reverted. */
+int dbmReleaseRevertible(dbm_state_t *state, const char *label, char *why,
+                         size_t room);
+
+/** The steps of the release reverted, after its first migration was. */
+int dbmReleaseRevert(driver_t *driver, dbm_state_t *state, const char *label,
+                     char *why, size_t room);
+
+/** What is due for dropping or purging by hand, said. */
+void dbmReleaseWarn(driver_t *driver, dbm_state_t *state);
+
+/** For a release: a deprecation set or cleared, and one dropped. */
+int dbmSchemaSetDeprecated(schema_t *db, const char *kind, const char *table,
+                           const char *column, yyjson_mut_val *entry);
+int dbmSchemaDropDeprecated(schema_t *db, const dbm_deprecated_t *item);
+
+/** For a release: the soft deleted rows purged and the backups dropped that are due. */
+int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
+                       char *why, size_t room);
+void dbmDmlWarn(driver_t *driver, dbm_state_t *state);
+
 /** dml migrations, recorded and reverted the way node does it. */
 int dbmUpDml(driver_t *driver, dbm_state_t *state,
              const dbm_migration_t *migration, char *why, size_t room);

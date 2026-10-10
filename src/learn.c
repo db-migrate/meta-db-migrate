@@ -54,6 +54,7 @@ typedef enum dbmAction {
   ACTION_REMOVE_INDEX "removeIndex",
   ACTION_ADD_FOREIGN_KEY "addForeignKey",
   ACTION_REMOVE_FOREIGN_KEY "removeForeignKey",
+  ACTION_SET_DEPRECATED "setDeprecated",
 } dbm_action_t;
 
 struct schema_t {
@@ -244,6 +245,25 @@ static void record(schema_t *self, int type, dbm_action_t action,
   if (!self->fixing)
     yyjson_mut_obj_add_int(doc, entry, "n", self->counter);
   yyjson_mut_arr_append(steps, entry);
+}
+
+/** One undo step whose arguments are not all names: `{t, a, c: args}`. */
+static void recordWith(schema_t *self, int type, dbm_action_t action,
+                       yyjson_mut_val *args) {
+
+  if (self->unlearn)
+    return;
+
+  yyjson_mut_doc *doc = self->record;
+  yyjson_mut_val *entry = yyjson_mut_obj(doc);
+
+  yyjson_mut_obj_add_int(doc, entry, "t", type);
+  yyjson_mut_obj_add_str(doc, entry, "a", spellingof(enum dbmAction, action));
+  yyjson_mut_obj_add_val(doc, entry, "c", args);
+
+  if (!self->fixing)
+    yyjson_mut_obj_add_int(doc, entry, "n", self->counter);
+  yyjson_mut_arr_append(yyjson_mut_obj_get(rootOf(doc), "s"), entry);
 }
 
 /** The schema and the record, written as they are now. Nothing on a dry run. */
@@ -445,6 +465,23 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     const char *n = step->name;
     yyjson_mut_val *parts[] = {c, f, i};
+    yyjson_mut_val *d = child(doc, schema, "d");
+    const char *const kinds[] = {"tables", "columns"};
+
+    /* deprecations move with the table - unless it is renamed for its own
+       deprecation, which stays under its name */
+    for (size_t at = 0; at < countof(kinds); ++at) {
+
+      yyjson_mut_val *marks = yyjson_mut_obj_get(d, kinds[at]);
+      yyjson_mut_val *held = yyjson_mut_obj_get(marks, t);
+      bool own = at == 0 && held != NULL &&
+                 strcmp(textOf(yyjson_mut_obj_get(held, "to")), n) == 0;
+
+      if (held != NULL && !own) {
+        put(doc, marks, n, held);
+        removeKey(marks, t);
+      }
+    }
 
     for (size_t at = 0; at < countof(parts); ++at) {
 
@@ -697,6 +734,41 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     record(self, 1, ACTION_ADD_FOREIGN_KEY, args, 2, NULL);
     return 0;
   }
+
+  case ACTION_SET_DEPRECATED: {
+
+    /* d.tables[t] or d.columns[t][c] set to the entry, or cleared */
+    const char *kind = step->other;
+    const char *column = step->name;
+    yyjson_mut_val *marks = child(doc, child(doc, schema, "d"), kind);
+    yyjson_mut_val *holder = column != NULL ? child(doc, marks, t) : marks;
+    const char *key = column != NULL ? column : t;
+    yyjson_mut_val *previous = yyjson_mut_obj_get(holder, key);
+    yyjson_mut_val *args = yyjson_mut_arr(mod);
+
+    yyjson_mut_arr_add_strcpy(mod, args, kind);
+    yyjson_mut_arr_add_strcpy(mod, args, t);
+
+    if (column != NULL)
+      yyjson_mut_arr_add_strcpy(mod, args, column);
+    else
+      yyjson_mut_arr_add_null(mod, args);
+
+    yyjson_mut_arr_append(args, previous != NULL
+                                    ? yyjson_mut_val_mut_copy(mod, previous)
+                                    : yyjson_mut_null(mod));
+
+    if (step->spec != NULL && !yyjson_mut_is_null(step->spec)) {
+      put(doc, holder, key, step->spec);
+    } else {
+      removeKey(holder, key);
+      if (column != NULL && yyjson_mut_obj_size(holder) == 0)
+        removeKey(marks, t);
+    }
+
+    recordWith(self, 2, ACTION_SET_DEPRECATED, args);
+    return 0;
+  }
   }
 
   return fail(self, TEXT`a step v2 does not know`);
@@ -795,6 +867,11 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
   case ACTION_REMOVE_FOREIGN_KEY:
     answer = driver->removeForeignKey(driver, t, step->name);
     break;
+
+  /* learned only: nothing to send */
+  case ACTION_SET_DEPRECATED:
+    answer = 0;
+    break;
   }
 
   if (answer != 0)
@@ -864,8 +941,8 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
       mark(self, "learned", op))
     return -1;
 
-  /* adopted: it is there already, made by somebody else */
-  if (self->adopting) {
+  /* adopted: it is there already, made by somebody else; a mark is learned only */
+  if (self->adopting || action == ACTION_SET_DEPRECATED) {
     self->done = op;
     return mark(self, "done", op);
   }
@@ -1047,6 +1124,193 @@ int schema_t__removeForeignKeyWith(schema_t *self, const char *table,
                                    const char *name, json_t options) {
   step_t step = {.table = table, .name = name};
   return dropping(self, ACTION_REMOVE_FOREIGN_KEY, &step, options);
+}
+
+/* ------------------------------------------------------------------ */
+/* deprecating, for a later release                                   */
+/* ------------------------------------------------------------------ */
+
+int dbmSchemaSetDeprecated(schema_t *self, const char *kind, const char *table,
+                           const char *column, yyjson_mut_val *entry) {
+
+  step_t step = {.table = table, .name = column, .other = kind};
+
+  step.spec = entry;
+  return perform(self, ACTION_SET_DEPRECATED, &step);
+}
+
+int dbmSchemaDropDeprecated(schema_t *self, const dbm_deprecated_t *item) {
+
+  if (item->column)
+    self->removeColumn(item->t, item->name);
+  else
+    self->dropTable(item->name);
+
+  return dbmSchemaSetDeprecated(self, item->column ? "columns" : "tables",
+                                item->t, item->column ? item->c : NULL, NULL);
+}
+
+/** `{r, to, o}` for what `name` is deprecated as, in this migration's release. */
+static yyjson_mut_val *deprecation(schema_t *self, const char *name,
+                                   json_t options) {
+
+  yyjson_mut_doc *doc = schemaDoc(self);
+  yyjson_mut_val *entry = yyjson_mut_obj(doc);
+  yyjson_mut_val *given = yyjson_mut_obj(doc);
+  const char *release = self->state->releaseLabel;
+  char to[300];
+  char why[300];
+
+  if (dbmReleaseOptions(options, doc, given, why, sizeof why)) {
+    fail(self, TEXT`${why}`);
+    return NULL;
+  }
+
+  dbmHiddenName(name, self->name, to, sizeof to);
+
+  if (release != NULL)
+    yyjson_mut_obj_add_strcpy(doc, entry, "r", release);
+  else
+    yyjson_mut_obj_add_null(doc, entry, "r");
+
+  yyjson_mut_obj_add_strcpy(doc, entry, "to", to);
+
+  if (yyjson_mut_obj_size(given) > 0)
+    yyjson_mut_obj_add_val(doc, entry, "o", given);
+
+  return entry;
+}
+
+int schema_t__deprecateTableWith(schema_t *self, const char *table,
+                                 json_t options) {
+
+  if (self->failed)
+    return -1;
+
+  if (tableIn(self, table) == NULL)
+    return unknownTable(self, table, false);
+
+  yyjson_mut_val *entry = deprecation(self, table, options);
+
+  return entry != NULL
+             ? dbmSchemaSetDeprecated(self, "tables", table, NULL, entry)
+             : -1;
+}
+
+int schema_t__deprecateTable(schema_t *self, const char *table) {
+  return self->deprecateTableWith(table, {});
+}
+
+int schema_t__deprecateColumnWith(schema_t *self, const char *table,
+                                  const char *column, json_t options) {
+
+  if (self->failed)
+    return -1;
+
+  if (tableIn(self, table) == NULL)
+    return unknownTable(self, table, false);
+
+  yyjson_mut_val *spec = yyjson_mut_obj_get(columnsOf(tableIn(self, table)),
+                                            column);
+
+  if (spec == NULL)
+    return unknownColumn(self, table, column, false);
+
+  yyjson_mut_val *entry = deprecation(self, column, options);
+
+  if (entry == NULL)
+    return -1;
+
+  /* the application stops writing it: NOT NULL relaxed, by the whole spec,
+     as MySQL changes a column */
+  if (yyjson_mut_is_obj(spec) &&
+      yyjson_mut_is_true(yyjson_mut_obj_get(spec, "notNull"))) {
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *relaxed = yyjson_mut_val_mut_copy(doc, spec);
+
+    yyjson_mut_obj_put(relaxed, yyjson_mut_str(doc, "notNull"),
+                       yyjson_mut_false(doc));
+    yyjson_mut_doc_set_root(doc, relaxed);
+
+    json_t changed = meta_jsonFromMut(doc);
+    int answer = self->changeColumn(table, column, changed);
+
+    changed.release();
+
+    if (answer != 0)
+      return -1;
+  }
+
+  return dbmSchemaSetDeprecated(self, "columns", table, column, entry);
+}
+
+int schema_t__deprecateColumn(schema_t *self, const char *table,
+                              const char *column) {
+  return self->deprecateColumnWith(table, column, {});
+}
+
+/**
+ * The deprecations named - all that are due when `table` is NULL - dropped
+ * and forgotten. One named that is not deprecated is refused.
+ */
+static int dropDeprecated(schema_t *self, const char *table,
+                          const char *column) {
+
+  if (self->failed)
+    return -1;
+
+  char why[600];
+  dbm_deprecated_t *items = calloc(512, sizeof(dbm_deprecated_t));
+  long count = items != NULL
+                   ? dbmDeprecations(self->state, self->state->releaseCurrent,
+                                     items, 512, why, sizeof why)
+                   : -1;
+  long dropped = 0;
+
+  if (count < 0) {
+    free(items);
+    return fail(self, TEXT`${items != NULL ? why : "out of memory"}`);
+  }
+
+  for (long i = 0; i < count && !self->failed; ++i) {
+
+    dbm_deprecated_t *item = &items[i];
+    bool target = table == NULL
+                      ? item->age >= item->releases
+                      : strcmp(item->t, table) == 0 &&
+                            (column == NULL
+                                 ? !item->column
+                                 : item->column && strcmp(item->c, column) == 0);
+
+    if (target) {
+      dbmSchemaDropDeprecated(self, item);
+      ++dropped;
+    }
+  }
+
+  free(items);
+
+  if (table != NULL && dropped == 0) {
+    if (column != NULL)
+      return fail(self, TEXT`The column "${column}" of "${table}" is not deprecated, deprecate it first`);
+    return fail(self, TEXT`The table "${table}" is not deprecated, deprecate it first`);
+  }
+
+  return self->failed ? -1 : 0;
+}
+
+int schema_t__dropDeprecated(schema_t *self) {
+  return dropDeprecated(self, NULL, NULL);
+}
+
+int schema_t__dropDeprecatedTable(schema_t *self, const char *table) {
+  return dropDeprecated(self, table, NULL);
+}
+
+int schema_t__dropDeprecatedColumn(schema_t *self, const char *table,
+                                   const char *column) {
+  return dropDeprecated(self, table, column);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1250,6 +1514,20 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
 
   dbm_action_t action = (dbm_action_t)found;
   step_t step = {.table = argument(args, 0)};
+
+  /* a mark, put back as it was before */
+  if (action == ACTION_SET_DEPRECATED) {
+
+    yyjson_mut_val *column = yyjson_mut_arr_get(args, 2);
+
+    step.other = argument(args, 0);
+    step.table = argument(args, 1);
+    step.name = column != NULL && yyjson_mut_is_str(column)
+                    ? yyjson_mut_get_str(column)
+                    : NULL;
+    step.spec = yyjson_mut_arr_get(args, 3);
+    return learn(self, action, &step);
+  }
 
   /* 0 is called as it was recorded; 2, adopted, is only forgotten again */
   if (type == 0 || type == 2) {

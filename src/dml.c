@@ -685,34 +685,10 @@ static int forgetBackups(dml_t *self, yyjson_mut_val *backups) {
 static int purgeOptions(dml_t *self, json_t options, yyjson_mut_doc *doc,
                         yyjson_mut_val *into) {
 
-  json_t releases = options.get("releases");
-  json_t drop = options.get("drop");
+  char why[300];
 
-  if (releases.node != NULL) {
-
-    double n = strcmp(releases.kind(), "number") == 0 ? releases.real()
-               : isText(releases)                     ? atof(releases.text())
-                                                      : 0;
-
-    if (n < 1 || n != (double)(long)n) {
-      char said[64] = "";
-      if (isText(releases))
-        dbmWrite(said, sizeof said, TEXT`${releases.text()}`);
-      else if (strcmp(releases.kind(), "number") == 0)
-        dbmWrite(said, sizeof said, TEXT`${releases.real()}`);
-      return fail(self, TEXT`releases is the number of releases until dropping, at least 1, not ${said}`);
-    }
-
-    yyjson_mut_obj_add_int(doc, into, "releases", (long)n);
-  }
-
-  if (drop.node != NULL) {
-
-    if (!isText(drop) || !(drop.text() in {"auto", "manual"}))
-      return fail(self, TEXT`drop is 'auto' or 'manual', not ${isText(drop) ? drop.text() : "that"}`);
-
-    yyjson_mut_obj_add_strcpy(doc, into, "drop", drop.text());
-  }
+  if (dbmReleaseOptions(options, doc, into, why, sizeof why))
+    return fail(self, TEXT`${why}`);
 
   return 0;
 }
@@ -826,21 +802,23 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
   yyjson_mut_doc *groups = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(groups);
   char *row = NULL;
+  long releases;
+  char drop[8];
 
   yyjson_mut_doc_set_root(groups, root);
 
   if (dbmKvGet(state->db, state->table, BACKUPS, &row) || row == NULL)
     return groups;
 
+  /* backups carry no options of their own: the project's, or node's */
+  if (dbmReleaseSettings(state, NULL, &releases, drop, self->error,
+                         sizeof self->error)) {
+    self->failed = true;
+    free(row);
+    return groups;
+  }
+
   json_t registry = meta_toJSON(row);
-  json_t index = meta_toJSON(state->releaseIndex != NULL ? state->releaseIndex : "{}");
-  json_t project = meta_toJSON(state->deprecation != NULL ? state->deprecation : "{}");
-  long releases = project.get("releases").node != NULL &&
-                          strcmp(project.get("releases").kind(), "number") == 0
-                      ? (long)project.get("releases").number()
-                      : 4;
-  const char *drop = isText(project.get("drop")) ? project.get("drop").text()
-                                                 : "manual";
 
   free(row);
 
@@ -854,13 +832,12 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
     if (group == NULL) {
 
       json_t release = entry.get("r");
-      long made = isText(release) && index.get(release.text()).node != NULL
-                      ? (long)index.get(release.text()).number()
-                      : 0;
 
       group = yyjson_mut_obj(groups);
       yyjson_mut_obj_add_int(groups, group, "age",
-                             state->releaseCurrent - made);
+                             dbmReleaseAge(state, state->releaseCurrent,
+                                           isText(release) ? release.text()
+                                                           : NULL));
       yyjson_mut_obj_add_int(groups, group, "releases", releases);
       yyjson_mut_obj_add_strcpy(groups, group, "drop", drop);
       yyjson_mut_obj_add_val(groups, group, "backups", yyjson_mut_arr(groups));
@@ -872,8 +849,6 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
   }
 
   registry.release();
-  index.release();
-  project.release();
 
   if (all)
     return groups;
@@ -2435,4 +2410,264 @@ int dbmDownDml(driver_t *driver, dbm_state_t *state,
 
   yyjson_mut_doc_free(db.record);
   return answer != 0 ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* at the start of a release                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The purges registered, with their age and what applies to them -
+ * `{mark: {t, key, age, releases, drop}}` - those due only.
+ */
+static yyjson_mut_doc *duePurges(dml_t *self) {
+
+  dbm_state_t *state = self->state;
+  yyjson_mut_doc *due = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(due);
+  char *row = NULL;
+
+  yyjson_mut_doc_set_root(due, root);
+
+  if (dbmKvGet(state->db, state->table, PURGES, &row) || row == NULL)
+    return due;
+
+  yyjson_mut_doc *registry = dbmRecordFrom(NULL);
+  yyjson_doc *read = yyjson_read(row, strlen(row), 0);
+
+  free(row);
+  yyjson_mut_doc_set_root(registry, read != NULL
+                                        ? yyjson_val_mut_copy(registry, yyjson_doc_get_root(read))
+                                        : yyjson_mut_obj(registry));
+  yyjson_doc_free(read);
+
+  yyjson_mut_obj_iter walk;
+  yyjson_mut_val *mark;
+
+  yyjson_mut_obj_iter_init(rootOf(registry), &walk);
+
+  while (!self->failed && (mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+
+    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(mark);
+    yyjson_mut_val *r = yyjson_mut_obj_get(entry, "r");
+    long age = dbmReleaseAge(state, state->releaseCurrent,
+                             r != NULL && yyjson_mut_is_str(r)
+                                 ? yyjson_mut_get_str(r)
+                                 : NULL);
+    long releases;
+    char drop[8];
+
+    if (dbmReleaseSettings(state, yyjson_mut_obj_get(entry, "o"), &releases,
+                           drop, self->error, sizeof self->error)) {
+      self->failed = true;
+      break;
+    }
+
+    if (age < releases)
+      continue;
+
+    yyjson_mut_val *item = yyjson_mut_val_mut_copy(due, entry);
+
+    yyjson_mut_obj_put(item, yyjson_mut_str(due, "age"), yyjson_mut_sint(due, age));
+    yyjson_mut_obj_put(item, yyjson_mut_str(due, "releases"), yyjson_mut_sint(due, releases));
+    yyjson_mut_obj_put(item, yyjson_mut_strcpy(due, "drop"), yyjson_mut_strcpy(due, drop));
+    yyjson_mut_obj_add(root, yyjson_mut_strcpy(due, yyjson_mut_get_str(mark)), item);
+  }
+
+  yyjson_mut_doc_free(registry);
+  return due;
+}
+
+static bool forgettingMarks(yyjson_mut_doc *doc, yyjson_mut_val *value,
+                            void *context) {
+
+  yyjson_mut_val *marks = context;
+  yyjson_mut_obj_iter walk;
+  yyjson_mut_val *mark;
+
+  (void)doc;
+  yyjson_mut_obj_iter_init(marks, &walk);
+
+  while ((mark = yyjson_mut_obj_iter_next(&walk)) != NULL)
+    yyjson_mut_obj_remove_key(value, yyjson_mut_get_str(mark));
+
+  return true;
+}
+
+/**
+ * The rows deleted in soft mode whose purge with drop "auto" is due,
+ * deleted for good - which makes the release irreversible - and the backups
+ * whose drop "auto" is due, dropped.
+ */
+int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
+                       char *why, size_t room) {
+
+  char name[300];
+
+  dbmWrite(name, sizeof name, TEXT`${DBM_RELEASE_PREFIX}${label}`);
+
+  dml_t self = {.driver = driver, .state = state, .name = name,
+                .dry = driver->dryRun,
+                .transactional = !driver->noTransactions};
+
+  self.record = dbmRecordFrom(NULL);
+
+  yyjson_mut_doc *due = duePurges(&self);
+  yyjson_mut_val *marks = yyjson_mut_obj(due);
+  yyjson_mut_obj_iter walk;
+  yyjson_mut_val *mark;
+
+  yyjson_mut_obj_iter_init(rootOf(due), &walk);
+
+  while (!self.failed && (mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+
+    const char *text = yyjson_mut_get_str(mark);
+    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(mark);
+    const char *table = textOf(yyjson_mut_obj_get(entry, "t"));
+
+    if (strcmp(textOf(yyjson_mut_obj_get(entry, "drop")), "auto") != 0)
+      continue;
+
+    yyjson_mut_obj_add(marks, yyjson_mut_strcpy(due, text),
+                       yyjson_mut_strcpy(due, table));
+    dbmSay(stdout, TEXT`[INFO] [release] purging the rows of "${table}" deleted in soft mode by ${text + 5}\n`);
+
+    if (self.dry)
+      continue;
+
+    statement_t condition;
+    statement_t change;
+    yyjson_mut_val *key = yyjson_mut_val_mut_copy(self.record, yyjson_mut_obj_get(entry, "key"));
+
+    opened(&condition);
+    markedBy(&self, &condition, text, false);
+    opened(&change);
+    change.sql.put("DELETE FROM ");
+    quoted(&self, &change.sql, table);
+    change.sql.put(" WHERE ");
+    untilDone(&self, table, key, &condition, BATCH, &change);
+    closed(&change);
+    closed(&condition);
+  }
+
+  /* nothing to purge any more, and the release can not be reverted */
+  if (!self.failed && !self.dry && yyjson_mut_obj_size(marks) > 0 &&
+      changeState(&self, PURGES, forgettingMarks, marks) == 0) {
+
+    char *row = NULL;
+
+    if (dbmKvGet(state->db, state->table, name, &row)) {
+      failedState(&self);
+    } else {
+
+      yyjson_mut_doc *record = dbmRecordFrom(row);
+      yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(record), "s");
+
+      yyjson_mut_obj_iter_init(marks, &walk);
+
+      while ((mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+
+        yyjson_mut_val *purged = yyjson_mut_obj(record);
+        yyjson_mut_val *args = yyjson_mut_arr(record);
+
+        yyjson_mut_arr_add_strcpy(record, args, textOf(yyjson_mut_obj_iter_get_val(mark)));
+        yyjson_mut_obj_add_int(record, purged, "t", 3);
+        yyjson_mut_obj_add_str(record, purged, "a", "purge");
+        yyjson_mut_obj_add_val(record, purged, "c", args);
+        yyjson_mut_obj_add_int(record, purged, "n", 0);
+        yyjson_mut_arr_append(steps, purged);
+      }
+
+      char *text = yyjson_mut_write(record, 0, NULL);
+      int answer = text == NULL ||
+                   (row != NULL ? dbmKvUpdate(state->db, state->table, name, text)
+                                : dbmKvInsert(state->db, state->table, name, text));
+
+      free(text);
+      free(row);
+      yyjson_mut_doc_free(record);
+
+      if (answer)
+        failedState(&self);
+    }
+  }
+
+  yyjson_mut_doc_free(due);
+
+  /* the backups of the migrations final now */
+  if (!self.failed) {
+
+    yyjson_mut_doc *groups = backupsOf(&self, false);
+    yyjson_mut_val *key;
+
+    yyjson_mut_obj_iter_init(rootOf(groups), &walk);
+
+    while (!self.failed && (key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+      yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
+      if (strcmp(textOf(yyjson_mut_obj_get(group, "drop")), "auto") == 0)
+        dropGroup(&self, yyjson_mut_get_str(key),
+                  yyjson_mut_obj_get(group, "backups"));
+    }
+
+    yyjson_mut_doc_free(groups);
+  }
+
+  yyjson_mut_doc_free(self.record);
+
+  if (self.failed) {
+    dbmWrite(why, room, TEXT`${self.error}`);
+    return -1;
+  }
+
+  return 0;
+}
+
+/** The purges and backups due with drop "manual", said, with what to do. */
+void dbmDmlWarn(driver_t *driver, dbm_state_t *state) {
+
+  dml_t self = {.driver = driver, .state = state, .name = "",
+                .dry = driver->dryRun};
+
+  self.record = dbmRecordFrom(NULL);
+
+  yyjson_mut_doc *due = duePurges(&self);
+  yyjson_mut_obj_iter walk;
+  yyjson_mut_val *key;
+
+  yyjson_mut_obj_iter_init(rootOf(due), &walk);
+
+  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+
+    const char *mark = yyjson_mut_get_str(key);
+    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(key);
+    char migration[300];
+    const char *hash = strrchr(mark, '#');
+
+    if (strcmp(textOf(yyjson_mut_obj_get(entry, "drop")), "manual") != 0)
+      continue;
+
+    dbmWrite(migration, hash != NULL && (size_t)(hash - mark - 5) + 1 < sizeof migration
+                            ? (size_t)(hash - mark - 5) + 1
+                            : sizeof migration,
+             TEXT`${mark + 5}`);
+    dbmSay(stderr, TEXT`[WARN] [release] the rows of "${textOf(yyjson_mut_obj_get(entry, "t"))}" deleted in soft mode by ${mark + 5} are due for purging, deleted ${numberOf(entry, "age")} releases ago. Purge them in a dml migration with db.purge("${textOf(yyjson_mut_obj_get(entry, "t"))}", "${migration}").\n`);
+  }
+
+  yyjson_mut_doc_free(due);
+
+  yyjson_mut_doc *groups = backupsOf(&self, false);
+
+  yyjson_mut_obj_iter_init(rootOf(groups), &walk);
+
+  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+    yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
+    if (strcmp(textOf(yyjson_mut_obj_get(group, "drop")), "manual") == 0)
+      dbmSay(stderr, TEXT`[WARN] [release] the backups of ${yyjson_mut_get_str(key)} are due for dropping, it ran ${numberOf(group, "age")} releases ago. Drop them in a dml migration with db.dropBackups("${yyjson_mut_get_str(key)}"), it can not be reverted afterwards.\n`);
+  }
+
+  yyjson_mut_doc_free(groups);
+  yyjson_mut_doc_free(self.record);
+
+  if (self.failed)
+    dbmSay(stderr, TEXT`[ERROR] ${self.error}\n`);
 }

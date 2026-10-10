@@ -207,6 +207,141 @@ static void giveLock(driver_t *driver) {
     dbmStateUnlock(driver->state);
 }
 
+/* ------------------------------------------------------------------ */
+/* releases                                                           */
+/* ------------------------------------------------------------------ */
+
+/** The release of each migration, by its place among them. */
+typedef struct {
+  const char *label;
+  long index;
+} release_at_t;
+
+static release_at_t *releaseOf;
+static dbm_text_t releaseIndex;
+
+/** The latest release migrated. */
+static long applied;
+
+static long placeOf(const dbm_migration_t *migration) {
+
+  size_t total;
+  const dbm_migration_t *migrations = dbmMigrations(&total);
+
+  return migration >= migrations && migration < migrations + total
+             ? migration - migrations
+             : -1;
+}
+
+static const dbm_migration_t *named(const char *name);
+
+/**
+ * The releases of the scope's migrations, as node counts them: in the order
+ * of their names, each new label the next release, a migration without one
+ * in the release before it, and those before the first label in release 0.
+ * Every one is loaded for it - a label is in the migration. And the latest
+ * release among those in `ran`.
+ */
+static void releasesOf(driver_t *driver, json_t ran) {
+
+  size_t total;
+  const dbm_migration_t *migrations = dbmMigrations(&total);
+  yyjson_mut_doc *index = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *labels = yyjson_mut_obj(index);
+  release_at_t current = {NULL, 0};
+
+  yyjson_mut_doc_set_root(index, labels);
+  release_at_t *fresh = calloc(total + 1, sizeof(release_at_t));
+  release_at_t *old = releaseOf;
+
+  releaseOf = fresh;
+  free(old);
+
+  for (size_t i = 0; releaseOf != NULL && i < total; ++i) {
+
+    if (!inScope(migrations[i].name))
+      continue;
+
+    /* one that can not be loaded any more has no label, as in node */
+    const char *label = dbmLoaded(&migrations[i]) ? migrations[i].release
+                                                   : NULL;
+
+    if (label != NULL &&
+        (current.label == NULL || strcmp(label, current.label) != 0)) {
+
+      yyjson_mut_val *known = yyjson_mut_obj_get(labels, label);
+
+      if (known == NULL) {
+        known = yyjson_mut_sint(index, (int64_t)yyjson_mut_obj_size(labels) + 1);
+        yyjson_mut_obj_add(labels, yyjson_mut_strcpy(index, label), known);
+      }
+
+      current.label = label;
+      current.index = (long)yyjson_mut_get_sint(known);
+    }
+
+    releaseOf[i] = current;
+  }
+
+  char *written = yyjson_mut_write(index, 0, NULL);
+
+  releaseIndex.release();
+  releaseIndex = (dbm_text_t){0};
+  releaseIndex.put(written != NULL ? written : "{}");
+  free(written);
+  yyjson_mut_doc_free(index);
+
+  applied = 0;
+
+  for (int i = 0; releaseOf != NULL && i < ran.count(); ++i) {
+    long at = placeOf(named(ran[i].name));
+    if (at >= 0 && releaseOf[at].index > applied)
+      applied = releaseOf[at].index;
+  }
+
+  if (driver->state != NULL) {
+    driver->state->releaseIndex = releaseIndex.text;
+    driver->state->releaseLabel = NULL;
+    driver->state->releaseCurrent = applied;
+  }
+}
+
+/**
+ * Before a migration of a release later than any migrated: what is due
+ * runs - or is learned again by fix. Then the migration runs in its release.
+ */
+static int enterRelease(driver_t *driver, const dbm_migration_t *migration,
+                        bool fix) {
+
+  long at = placeOf(migration);
+  release_at_t r = at >= 0 && releaseOf != NULL ? releaseOf[at]
+                                                : (release_at_t){NULL, 0};
+  dbm_state_t *state = driver->state;
+
+  if (state == NULL)
+    return 0;
+
+  if (r.index > applied) {
+
+    char why[600] = "";
+
+    state->releaseCurrent = r.index;
+
+    if (dbmReleaseStart(driver, state, r.label, r.index, fix, why,
+                        sizeof why)) {
+      if (why[0] != '\0')
+        dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
+      return -1;
+    }
+
+    applied = r.index;
+  }
+
+  state->releaseLabel = r.label;
+  state->releaseCurrent = applied;
+  return 0;
+}
+
 /** One migration, one direction, one transaction. */
 static int step(driver_t *driver, const dbm_migration_t *migration,
                 direction_t direction) {
@@ -349,6 +484,8 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
   defer names.release();
   defer giveLock(driver);
 
+  releasesOf(driver, names);
+
   for (size_t i = 0; i < total && (count == 0 || done < count); ++i) {
 
     if (!inScope(migrations[i].name) || hasRun(names, migrations[i].name))
@@ -358,7 +495,8 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
     if (destination != NULL && towards(migrations[i].name, destination) > 0)
       break;
 
-    if (step(driver, &migrations[i], UP))
+    if (enterRelease(driver, &migrations[i], false) ||
+        step(driver, &migrations[i], UP))
       return -1;
 
     ++done;
@@ -366,6 +504,12 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
 
   if (done == 0)
     dbmSay(stdout, TEXT`[INFO] No migrations to run\n`);
+
+  /* what is due for dropping or purging by hand */
+  if (driver->state != NULL) {
+    driver->state->releaseCurrent = applied;
+    dbmReleaseWarn(driver, driver->state);
+  }
 
   dbmSay(stdout, TEXT`[INFO] Done\n`);
   return 0;
@@ -415,6 +559,8 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   defer names.release();
   defer giveLock(driver);
 
+  releasesOf(driver, names);
+
   for (int i = names.count() - 1; i >= 0 && (count == 0 || done < count);
        --i) {
 
@@ -433,8 +579,38 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
       return -1;
     }
 
+    /* the last migration of its release: the release's steps go with it,
+       which is refused before anything when rows were purged */
+    long at = placeOf(migration);
+    release_at_t r = at >= 0 && releaseOf != NULL ? releaseOf[at]
+                                                  : (release_at_t){NULL, 0};
+    long remaining = 0;
+    char why[600] = "";
+
+    for (int j = 0; j < i; ++j) {
+      long other = placeOf(named(names[j].name));
+      if (inScope(names[j].name) && other >= 0 &&
+          releaseOf[other].index > remaining)
+        remaining = releaseOf[other].index;
+    }
+
+    bool leaving = r.label != NULL && remaining < r.index &&
+                   driver->state != NULL;
+
+    if (leaving && dbmReleaseRevertible(driver->state, r.label, why, sizeof why)) {
+      dbmSay(stderr, TEXT`[ERROR] ${shown(name)}: ${why}\n`);
+      return -1;
+    }
+
     if (step(driver, migration, DOWN))
       return -1;
+
+    if (leaving && dbmReleaseRevert(driver, driver->state, r.label, why,
+                                    sizeof why)) {
+      if (why[0] != '\0')
+        dbmSay(stderr, TEXT`[ERROR] ${shown(name)}: ${why}\n`);
+      return -1;
+    }
 
     ++done;
   }
@@ -522,6 +698,11 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
 
   dbmStateForgetSchema(driver->state);
 
+  /* the releases learned again from the first: none migrated yet */
+  json_t none = meta_toJSON("[]");
+  releasesOf(driver, none);
+  none.release();
+
   /* oldest first, as they were built */
   for (int i = 0; i < names.count(); ++i) {
 
@@ -536,6 +717,9 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
       dbmSay(stderr, TEXT`[ERROR] ${shown(name)} was run, and this program does not have it\n`);
       return -1;
     }
+
+    if (enterRelease(driver, migration, true))
+      return -1;
 
     if (migration->dml != NULL) {
       dbmSay(stdout, TEXT`[INFO] [fix] skipping "${dbmKeyOf(name)}", dml migrations change no schema\n`);

@@ -293,6 +293,30 @@ int schema_t__addForeignKey(schema_t *self, const char *table,
 int schema_t__removeForeignKey(schema_t *self, const char *table,
                                const char *name);
 
+/**
+ * A table or column the application stops using, marked in this migration's
+ * release - node's db.deprecateTable and db.deprecateColumn. With the next
+ * release it is renamed out of the way, after `releases` of them (4) it is
+ * dropped: with {drop: "auto"} by itself, otherwise when a migration calls
+ * dropDeprecated. A NOT NULL column is relaxed first.
+ *
+ *   db->deprecateTableWith("legacy_orders", {releases: 2, drop: "auto"});
+ *   db->deprecateColumn("users", "fax");
+ */
+int schema_t__deprecateTable(schema_t *self, const char *table);
+int schema_t__deprecateTableWith(schema_t *self, const char *table,
+                                 json_t options);
+int schema_t__deprecateColumn(schema_t *self, const char *table,
+                              const char *column);
+int schema_t__deprecateColumnWith(schema_t *self, const char *table,
+                                  const char *column, json_t options);
+
+/** Every deprecation that is due dropped - or the one named, due or not. */
+int schema_t__dropDeprecated(schema_t *self);
+int schema_t__dropDeprecatedTable(schema_t *self, const char *table);
+int schema_t__dropDeprecatedColumn(schema_t *self, const char *table,
+                                   const char *column);
+
 bool schema_t__hasFailed(schema_t *self);
 const char *schema_t__lastError(schema_t *self);
 int schema_t__fail(schema_t *self, text_t why);

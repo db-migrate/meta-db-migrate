@@ -421,6 +421,18 @@ void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
   migrations.push(entry);
 }
 
+/** The ones that could not be loaded, said once and not tried again. */
+static char *[] unloadable;
+
+static bool loadFailed(const dbm_migration_t *migration) {
+
+  for (name in unloadable)
+    if (strcmp(*name, migration->name) == 0)
+      return true;
+
+  return false;
+}
+
 bool dbmLoaded(const dbm_migration_t *migration) {
 
   if (migration->load == NULL || migration->up != NULL ||
@@ -428,18 +440,23 @@ bool dbmLoaded(const dbm_migration_t *migration) {
       migration->migrate != NULL || migration->dml != NULL)
     return true;
 
-  if (!migration->load(migration->file, migration->name))
+  if (loadFailed(migration))
     return false;
 
+  bool loaded = migration->load(migration->file, migration->name);
+
   /* its DBM_MIGRATION filled this very entry in, if the name agreed */
-  if (migration->up == NULL && migration->down == NULL &&
+  if (loaded && migration->up == NULL && migration->down == NULL &&
       migration->upSql == NULL && migration->migrate == NULL &&
       migration->dml == NULL) {
     dbmSay(stderr, TEXT`[ERROR] ${migration->file} was loaded and registered nothing - it needs a DBM_MIGRATION(up, down)\n`);
-    return false;
+    loaded = false;
   }
 
-  return true;
+  if (!loaded)
+    unloadable.push(strdup(migration->name));
+
+  return loaded;
 }
 
 static int byName(const void *a, const void *b) {

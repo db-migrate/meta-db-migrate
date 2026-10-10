@@ -584,7 +584,8 @@ static void *schemaFrom(const char *text) {
     yyjson_mut_doc_set_root(doc, root);
   }
 
-  const char *const parts[] = {"i", "c", "f", "e"};
+  /* d: the deprecations, since node 1.5 */
+  const char *const parts[] = {"i", "c", "f", "e", "d"};
 
   for (size_t i = 0; i < countof(parts); ++i)
     if (yyjson_mut_obj_get(root, parts[i]) == NULL)
