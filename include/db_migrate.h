@@ -48,6 +48,25 @@
 
 #define DBM_VERSION "0.5.0"
 
+/**
+ * One number for what this library hands across to a program built against
+ * its headers - dbm_migration_t, dbm_options_t, dbm_work_t and the rest -
+ * as meta's META_RUNTIME_ABI is for its runtime. An object built against
+ * headers of another number asks for a symbol the library does not define,
+ * and the linker says so by name instead of the program misreading a struct:
+ *
+ *     undefined reference to `dbm_needs_abi_1'
+ *
+ * Raised whenever such a type changes its layout or its meaning. The SBOM
+ * of a release names it as db-migrate:abi.
+ */
+#define DBM_ABI 1
+
+extern const char dbm_needs_abi_1;
+
+__attribute__((used)) static const char *const dbmNeedsAbi__ =
+    &dbm_needs_abi_1;
+
 typedef struct driver_t driver_t;
 
 /**

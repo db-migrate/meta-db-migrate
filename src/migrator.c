@@ -423,6 +423,9 @@ void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
   migrations.push(entry);
 }
 
+/** What every object built against these headers asks for, see DBM_ABI. */
+const char dbm_needs_abi_1 = DBM_ABI;
+
 /** The ones that could not be loaded, said once and not tried again. */
 static char *[] unloadable;
 

@@ -113,6 +113,23 @@ if stage:
                     "type": "file", "bom-ref": "file:" + shown, "name": shown,
                     "hashes": [{"alg": "SHA-256", "content": sha}]})
 
+def defined(path, name):
+    """A number a header #defines, as text, or "unknown"."""
+    try:
+        for line in open(path):
+            words = line.split()
+            if len(words) >= 3 and words[0] == "#define" and words[1] == name:
+                return words[2]
+    except OSError:
+        pass
+    return "unknown"
+
+# the ABI numbers a program built against the headers links by
+here = os.path.dirname(os.path.abspath(__file__))
+abi = defined(os.path.join(here, "..", "include", "db_migrate.h"), "DBM_ABI")
+runtimeAbi = defined(os.path.join(metaDir, "runtime", "include", "meta_abi.h"),
+                     "META_RUNTIME_ABI")
+
 root = "pkg:github/db-migrate/meta-db-migrate@v" + version
 bom = {
     "bomFormat": "CycloneDX",
@@ -130,7 +147,9 @@ bom = {
             "externalReferences": [{
                 "type": "vcs",
                 "url": "https://github.com/db-migrate/meta-db-migrate"}],
-            "properties": [{"name": "git:commit", "value": commit}]},
+            "properties": [{"name": "git:commit", "value": commit},
+                           {"name": "db-migrate:abi", "value": abi},
+                           {"name": "meta:runtime-abi", "value": runtimeAbi}]},
     },
     "components": components,
     "dependencies": [{"ref": root, "dependsOn": [
