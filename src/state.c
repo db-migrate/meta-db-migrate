@@ -150,7 +150,7 @@ static char *rewritten(dbm_state_t *self, const char *value,
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(doc);
   yyjson_mut_val *s = strcmp(old.s.kind(), "object") == 0
-                          ? yyjson_val_mut_copy(doc, old.s.node)
+                          ? yyjson_mut_val_mut_copy(doc, old.s.node)
                           : yyjson_mut_obj(doc);
 
   /* node's first fields, in node's order, for a row that has none */
@@ -162,7 +162,7 @@ static char *rewritten(dbm_state_t *self, const char *value,
 
   for (int i = 0; i < change.count(); ++i)
     setField(doc, s, change.keyAt(i),
-             yyjson_val_mut_copy(doc, change.get(change.keyAt(i)).node));
+             yyjson_mut_val_mut_copy(doc, change.get(change.keyAt(i)).node));
 
   setField(doc, s, "ID", release ? yyjson_mut_int(doc, 0)
                                  : yyjson_mut_strcpy(doc, self->id));

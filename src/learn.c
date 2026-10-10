@@ -154,7 +154,7 @@ static void removeKey(yyjson_mut_val *parent, const char *key) {
 
 /** A document someone handed over, as a value of `doc`. */
 static yyjson_mut_val *copyIn(yyjson_mut_doc *doc, json_t value) {
-  return value.node != NULL ? yyjson_val_mut_copy(doc, value.node)
+  return value.node != NULL ? yyjson_mut_val_mut_copy(doc, value.node)
                             : yyjson_mut_obj(doc);
 }
 

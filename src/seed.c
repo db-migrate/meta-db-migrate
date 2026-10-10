@@ -212,7 +212,7 @@ static int insertRows(seed_t *self, const char *table, json_t rows) {
   for (int i = 0; i < rows.count(); ++i) {
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *row = yyjson_val_mut_copy(doc, rows.at(i).node);
+    yyjson_mut_val *row = yyjson_mut_val_mut_copy(doc, rows.at(i).node);
 
     yyjson_mut_obj_remove_key(row, FLAG);
     yyjson_mut_obj_add_strcpy(doc, row, FLAG, flag);

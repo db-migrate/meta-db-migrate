@@ -259,7 +259,7 @@ static yyjson_mut_val *fromEnv(yyjson_mut_doc *doc, json_t entry) {
     return yyjson_mut_strcpy(doc, set);
 
   if (strcmp(fallback.kind(), "nothing") != 0)
-    return yyjson_val_mut_copy(doc, fallback.node);
+    return yyjson_mut_val_mut_copy(doc, fallback.node);
 
   return set != NULL ? yyjson_mut_strcpy(doc, set) : yyjson_mut_null(doc);
 }
@@ -289,7 +289,7 @@ static yyjson_mut_val *walked(yyjson_mut_doc *doc, json_t value) {
     return array;
   }
 
-  return yyjson_val_mut_copy(doc, value.node);
+  return yyjson_mut_val_mut_copy(doc, value.node);
 }
 
 static json_t resolved(json_t entry) {
@@ -627,7 +627,7 @@ static int database(const options_t *options, json_t config) {
 
   char why[512] = "";
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *bare = yyjson_val_mut_copy(doc, config.node);
+  yyjson_mut_val *bare = yyjson_mut_val_mut_copy(doc, config.node);
 
   if (yyjson_mut_is_obj(bare))
     yyjson_mut_obj_remove_key(bare, "database");
@@ -790,7 +790,7 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
   const char *dir = options->dir != NULL ? options->dir : "migrations";
 
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *merged = yyjson_val_mut_copy(doc, config.node);
+  yyjson_mut_val *merged = yyjson_mut_val_mut_copy(doc, config.node);
 
   yyjson_mut_doc_set_root(doc, merged);
 
@@ -841,7 +841,7 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
 
     yyjson_mut_obj_remove_key(merged, key);
     yyjson_mut_obj_add(merged, yyjson_mut_strcpy(doc, key),
-                       yyjson_val_mut_copy(doc, value.node));
+                       yyjson_mut_val_mut_copy(doc, value.node));
   }
 
   return meta_jsonFromMut(doc);
@@ -1052,7 +1052,7 @@ int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
 
   /* a copy, since the tunnel puts another in its place and frees this one */
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_doc_set_root(doc, yyjson_val_mut_copy(doc, config.node));
+  yyjson_mut_doc_set_root(doc, yyjson_mut_val_mut_copy(doc, config.node));
 
   json_t own = meta_jsonFromMut(doc);
   defer own.releaseAt();

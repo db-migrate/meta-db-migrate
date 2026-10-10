@@ -237,7 +237,7 @@ bool dbmTunnelOpen(json_t *config, dbm_tunnel_t **opened, char *why,
 
   /* the connection, pointed at the tunnel's end; the tunnel is not its business */
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *copy = yyjson_val_mut_copy(doc, connection.node);
+  yyjson_mut_val *copy = yyjson_mut_val_mut_copy(doc, connection.node);
 
   yyjson_mut_obj_remove_key(copy, "tunnel");
   yyjson_mut_obj_remove_key(copy, "host");

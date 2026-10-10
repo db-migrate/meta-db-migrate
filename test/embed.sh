@@ -52,7 +52,7 @@ int moduleStart(const char *file) {
   defer config.releaseAt();
 
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_val_mut_copy(doc, config.node);
+  yyjson_mut_val *root = yyjson_mut_val_mut_copy(doc, config.node);
   yyjson_mut_obj_add_str(doc, root, "filename", file);
   yyjson_mut_doc_set_root(doc, root);
 
