@@ -623,7 +623,9 @@ dbm_state_t *dbmStateOpen(driver_t *db, const char *table, long timeoutMs,
   self->intervalMs = intervalMs > 0 ? intervalMs : 1000;
   processId(self->id);
   pthread_mutex_init(&self->writing, NULL);
+  pthread_mutex_init(&self->statements, NULL);
   pthread_cond_init(&self->wake, NULL);
+  db->serial = &self->statements;
 
   /**
    * A dry run reads what there is and writes nothing - no table, no row -
@@ -675,6 +677,12 @@ void dbmStateClose(dbm_state_t *self) {
 
   dbmStateUnlock(self);
   yyjson_mut_doc_free(self->schema);
+
+  /* the connection outlives this, closed after it */
+  if (self->db->serial == &self->statements)
+    self->db->serial = NULL;
+
+  pthread_mutex_destroy(&self->statements);
   pthread_mutex_destroy(&self->writing);
   pthread_cond_destroy(&self->wake);
   free(self);

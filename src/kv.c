@@ -19,6 +19,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * One statement on the connection, alone on it while it runs - the state's
+ * connection is shared with the lock's heartbeat.
+ */
+static int asked(driver_t *self, const sql_t *query, json_t *rows) {
+
+  if (self->serial != NULL)
+    pthread_mutex_lock(self->serial);
+
+  int answer = self->query(self, query, rows);
+
+  if (self->serial != NULL)
+    pthread_mutex_unlock(self->serial);
+
+  return answer;
+}
+
 /** A name, quoted the way this driver quotes them, as a piece of SQL. */
 static sql_t quoted(driver_t *self, const char *name) {
 
@@ -65,7 +82,7 @@ int dbmKvGet(driver_t *self, const char *table, const char *key,
 
   *value = NULL;
 
-  if (self->query(self, &query, &rows))
+  if (asked(self, &query, &rows))
     return -1;
 
   if (rows.count() > 0) {
@@ -93,7 +110,7 @@ int dbmKvInsert(driver_t *self, const char *table, const char *key,
                     VALUES (${key}, ${value}, CURRENT_TIMESTAMP)`;
   defer query.release();
 
-  return self->query(self, &query, NULL);
+  return asked(self, &query, NULL);
 }
 
 int dbmKvUpdate(driver_t *self, const char *table, const char *key,
@@ -112,7 +129,7 @@ int dbmKvUpdate(driver_t *self, const char *table, const char *key,
                     ${&r} = CURRENT_TIMESTAMP WHERE ${&k} = ${key}`;
   defer query.release();
 
-  return self->query(self, &query, NULL);
+  return asked(self, &query, NULL);
 }
 
 /**
@@ -138,7 +155,7 @@ int dbmKvSwap(driver_t *self, const char *table, const char *key,
                     WHERE ${&k} = ${key} AND ${&v} = ${expected}`;
   defer query.release();
 
-  return self->query(self, &query, NULL);
+  return asked(self, &query, NULL);
 }
 
 int dbmKvDelete(driver_t *self, const char *table, const char *key) {
@@ -151,5 +168,5 @@ int dbmKvDelete(driver_t *self, const char *table, const char *key) {
   sql_t query = SQL`DELETE FROM ${&t} WHERE ${&k} = ${key}`;
   defer query.release();
 
-  return self->query(self, &query, NULL);
+  return asked(self, &query, NULL);
 }

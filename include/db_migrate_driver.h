@@ -36,6 +36,8 @@
 
 #include "db_migrate.h"
 
+#include <pthread.h>
+
 
 /** Per column, what `columnDef` was asked to write and what it decided. */
 typedef struct {
@@ -96,6 +98,13 @@ struct driver_t {
    * CONCURRENTLY. The record is still written after the migration.
    */
   bool noTransactions;
+
+  /**
+   * Set on the connection node's state is kept through: its statements one
+   * at a time, because the lock's heartbeat writes through it from a thread
+   * of its own, and no client library takes two at once.
+   */
+  pthread_mutex_t *serial;
 
   /** The table the walker keeps its records in. */
   const char *migrationTable;
@@ -324,6 +333,9 @@ typedef struct dbm_state_t {
 
   /** The schema the v2 migrations built: `{i, c, f, e}`, as JSON. */
   void *schema;
+
+  /** The statements on `db`, one at a time - what `db->serial` points at. */
+  pthread_mutex_t statements;
 
   /** Writes from the heartbeat and from the walker, one at a time. */
   pthread_mutex_t writing;
