@@ -260,6 +260,33 @@ run up >/dev/null 2>&1
 run down -c 1 >/dev/null 2>&1
 expect "reverting forgets the backups" "{}" "$(state __dbmigrate_backups__)"
 
+# ---------------------------------------------------------------- status
+
+project status
+echo '{"deprecation": {"releases": 1}}' >"$dir/.db-migraterc"
+add '  db->createTable("pets", {id: {type: "int", primaryKey: true}, kind: "string", deleted_at: "datetime"});
+  db->createTable("owners", {id: "int"});
+  db->deprecateTableWith("owners", {releases: 1});' r1
+add '  db->insert("pets", [{id: 1, kind: "dog"}]);
+  db->update("pets", {kind: "hound"}, {kind: "dog"});
+  db->deleteWith("pets", {id: 1}, {mode: "soft", column: "deleted_at", purge: true});' "" dml
+add '  db->createTable("a", {id: "int"});' r2
+run up >/dev/null 2>&1
+add '  db->createTable("b", {id: "int"});'
+expect "status says what is pending, deprecated and due, in node's words" \
+'Pending migrations:
+  20261009000004-m4
+Release: r2
+Migration lock: free
+Background jobs: none
+Deprecated:
+  table "owners" renamed to __dbm_deprecated_owners_20261009000001, 1 of 1 releases, due to drop (manual)
+Purges:
+  "pets" by 20261009000002-m2#3, 1 of 1 releases, due (manual)
+Backups:
+  20261009000002-m2: 1 table(s), 1 of 1 releases, due (manual)' \
+  "$(run status 2>&1 | grep -v '^\[')"
+
 # ------------------------------------------------------- fix and releases
 
 project fix

@@ -97,6 +97,8 @@ commands:
   create name        a new migration in migrations/
                      (--sql, --sql-file, --v2-file, --template NAME)
 
+  status             what is pending, the release, the lock, the background
+                     jobs, and what is deprecated or due
   work               run the background jobs (--parallel N, --pause MS,
                      --batch N, --interval MS, --job-timeout MS, --watch)
   seed [name]        the seeds in seeds/ again: what they inserted removed, run
@@ -988,7 +990,7 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
   driver_t *stateDriver;
   driver_t *driver = dbmConnect(
       config, &settings,
-      options->dryRun || strcmp(options->command, "check") == 0, &stateDriver,
+      options->dryRun || (options->command in {"check", "status"}), &stateDriver,
       why, sizeof why);
 
   if (driver == NULL) {
@@ -1035,6 +1037,8 @@ static int inScope(options_t *options, json_t environment, const char *scope) {
     else
       dbmSay(stdout, TEXT`[INFO] Done\n`);
   }
+  else if (strcmp(options->command, "status") == 0)
+    answer = dbmStatus(driver);
   else
     answer = dbmCheck(driver);
 
@@ -1086,7 +1090,7 @@ int dbmCli(int argc, char **argv) {
     return create(&options);
 
   if (!(options.command in {"up", "down", "reset", "check", "sync", "db",
-                            "fix", "seed", "work"}))
+                            "fix", "seed", "work", "status"}))
     return usage();
 
   if (strcmp(options.command, "db") == 0 &&

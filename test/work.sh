@@ -137,6 +137,11 @@ expect "as a queued job, in node's words" "queued 1" \
 expect "the job as node writes it" \
   '{"step":0,"learned":0,"done":0,"rb":0,"s":"queued","blocking":false,"ID":0}' \
   "$(lite "select json_extract(value, '\$.jobs.\"$JOB\"') from migrations_state where key = '__dbmigrate_jobs__'" | sed 's/,"n":"[0-9a-f]*"//')"
+expect "status: running in the background, not pending" \
+'Pending migrations: none
+Background jobs:
+  20261009000003-m3: queued' \
+  "$(run status 2>&1 | grep -v '^\[\|^Release\|^Migration lock\|^Deprecated\|^Purges\|^Backups')"
 run up >up2.out 2>&1
 expect "up again neither runs nor registers it again" "1 $JOB" \
   "$(grep -c "$JOB is running in the background" up2.out) $(lite "select group_concat(key) from json_each((select json_extract(value, '\$.jobs') from migrations_state where key = '__dbmigrate_jobs__'))")"

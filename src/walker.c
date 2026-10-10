@@ -948,3 +948,271 @@ int dbmCheck(driver_t *driver) {
   dbmSay(stdout, TEXT`[INFO] ${pending} migration(s) to run\n`);
   return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* status                                                             */
+/* ------------------------------------------------------------------ */
+
+/** `Title: none`, or the title and its lines - node's sections. */
+static void section(const char *title, dbm_text_t *lines) {
+  if (lines->length == 0)
+    dbmSay(stdout, TEXT`${title}: none\n`);
+  else
+    dbmSay(stdout, TEXT`${title}:\n${lines->text}`);
+}
+
+static void dueText(dbm_text_t *out, long age, long releases, const char *drop,
+                    const char *due) {
+  out->append(TEXT`, ${age} of ${releases} releases`);
+  if (age >= releases)
+    out->append(TEXT`, ${due} (${drop})`);
+  out->put("\n");
+}
+
+int dbmStatus(driver_t *driver) {
+
+  size_t total;
+  const dbm_migration_t *migrations = dbmMigrations(&total);
+  dbm_state_t *state = driver->state;
+
+  driver->dryRun = false;
+
+  json_t names, bool ready = loaded(driver);
+
+  if (!ready)
+    return -1;
+
+  defer names.release();
+
+  releasesOf(driver, names);
+
+  json_t jobs = jobsOf(driver);
+  defer jobs.release();
+
+  dbm_text_t lines = {0};
+  defer lines.release();
+
+  /* pending, the background migrations running left out */
+  for (size_t i = 0; i < total; ++i)
+    if (inScope(migrations[i].name) && !hasRun(names, migrations[i].name) &&
+        !inBackground(jobs, migrations[i].name))
+      lines.append(TEXT`  ${shown(migrations[i].name)}\n`);
+
+  section("Pending migrations", &lines);
+
+  /* the latest release migrated */
+  const char *release = NULL;
+
+  for (size_t i = 0; releaseOf != NULL && i < total; ++i)
+    if (applied > 0 && releaseOf[i].index == applied)
+      release = releaseOf[i].label;
+
+  dbmSay(stdout, TEXT`Release: ${release != NULL ? release : "none"}\n`);
+
+  if (state == NULL) {
+    section("Background jobs", &(dbm_text_t){0});
+    section("Deprecated", &(dbm_text_t){0});
+    section("Purges", &(dbm_text_t){0});
+    section("Backups", &(dbm_text_t){0});
+    return 0;
+  }
+
+  char *row = NULL;
+
+  if (dbmKvGet(state->db, state->table, "__dbmigrate_state__", &row) == 0 &&
+      row != NULL) {
+
+    json_t lock = meta_toJSON(row);
+    json_t s = lock.get("s");
+    json_t id = s.get("ID");
+    bool held = (strcmp(id.kind(), "string") == 0 && id.text()[0] != '\0') ||
+                (strcmp(id.kind(), "number") == 0 && id.number() != 0);
+    bool interrupted = strcmp(s.get("fin").kind(), "number") == 0 &&
+                       s.get("fin").number() == 0 && s.get("f").text()[0] != '\0';
+
+    lines.release();
+    lines = (dbm_text_t){0};
+
+    if (held)
+      lines.append(TEXT`held since ${s.get("date").text()}`);
+    else
+      lines.put("free");
+
+    if (interrupted)
+      lines.append(TEXT`, ${s.get("o").text()} of ${s.get("f").text()} interrupted at step ${s.get("step").number()}`);
+
+    dbmSay(stdout, TEXT`Migration lock: ${lines.text}\n`);
+    lock.release();
+  }
+
+  free(row);
+
+  /* the jobs, and whether a migration holds them paused */
+  yyjson_mut_doc *seen = yyjson_mut_doc_new(NULL);
+  yyjson_mut_doc_set_root(seen, yyjson_mut_obj(seen));
+
+  bool paused = dbmJobsPaused(state, seen);
+  json_t list = jobs.get("jobs");
+  const char **keys = calloc((size_t)list.count() + 1, sizeof(char *));
+
+  yyjson_mut_doc_free(seen);
+
+  for (int i = 0; keys != NULL && i < list.count(); ++i)
+    keys[i] = list.keyAt(i);
+
+  for (int i = 0; keys != NULL && i < list.count(); ++i)
+    for (int j = i + 1; j < list.count(); ++j)
+      if (strcmp(keys[j], keys[i]) < 0) {
+        const char *swap = keys[i];
+        keys[i] = keys[j];
+        keys[j] = swap;
+      }
+
+  lines.release();
+  lines = (dbm_text_t){0};
+
+  for (int i = 0; keys != NULL && i < list.count(); ++i) {
+
+    json_t job = list.get(keys[i]);
+
+    lines.append(TEXT`  ${keys[i]}: ${job.get("s").text()}${job.get("blocking").truth() ? ", blocking" : ""}`);
+
+    if (job.get("step").number() != 0)
+      lines.append(TEXT`, step ${job.get("step").number()}, ${job.get("done").number()} done`);
+
+    if (job.get("err").text()[0] != '\0')
+      lines.append(TEXT`, ${job.get("err").text()}`);
+
+    lines.put("\n");
+  }
+
+  free(keys);
+  section(paused ? "Background jobs (paused for migrations)" : "Background jobs",
+          &lines);
+
+  /* deprecated, renamed or not, and when due */
+  char why[600] = "";
+  dbm_deprecated_t *items = calloc(512, sizeof(dbm_deprecated_t));
+  long count = items != NULL ? dbmDeprecations(state, applied, items, 512, why,
+                                               sizeof why)
+                             : 0;
+
+  lines.release();
+  lines = (dbm_text_t){0};
+
+  for (long i = 0; i < count; ++i) {
+
+    dbm_deprecated_t *item = &items[i];
+
+    if (item->column)
+      lines.append(TEXT`  column "${item->c}" of "${item->t}"`);
+    else
+      lines.append(TEXT`  table "${item->t}"`);
+
+    if (item->renamed)
+      lines.append(TEXT` renamed to ${item->name}`);
+
+    dueText(&lines, item->age, item->releases, item->drop, "due to drop");
+  }
+
+  free(items);
+  section("Deprecated", &lines);
+
+  if (count < 0)
+    dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
+
+  /* the soft deletes to purge, and the backups to drop */
+  const char *const keysOf[] = {"__dbmigrate_purges__", "__dbmigrate_backups__"};
+
+  for (size_t k = 0; k < countof(keysOf); ++k) {
+
+    row = NULL;
+    lines.release();
+    lines = (dbm_text_t){0};
+
+    if (dbmKvGet(state->db, state->table, keysOf[k], &row) == 0 && row != NULL) {
+
+      json_t registry = meta_toJSON(row);
+      long releases;
+      char drop[8];
+
+      if (k == 0) {
+
+        for (int i = 0; i < registry.count(); ++i) {
+
+          const char *mark = registry.keyAt(i);
+          json_t entry = registry.get(mark);
+          json_t r = entry.get("r");
+          char o[200];
+          char *options = yyjson_mut_val_write(entry.get("o").node, 0, NULL);
+          yyjson_mut_doc *given = yyjson_mut_doc_new(NULL);
+          yyjson_doc *parsed = options != NULL ? yyjson_read(options, strlen(options), 0) : NULL;
+
+          dbmWrite(o, sizeof o, TEXT`${options != NULL ? options : ""}`);
+          yyjson_mut_doc_set_root(given, parsed != NULL ? yyjson_val_mut_copy(given, yyjson_doc_get_root(parsed)) : NULL);
+          yyjson_doc_free(parsed);
+          free(options);
+
+          if (dbmReleaseSettings(state, yyjson_mut_doc_get_root(given), &releases,
+                                 drop, why, sizeof why) == 0) {
+            long age = dbmReleaseAge(state, applied,
+                                     strcmp(r.kind(), "string") == 0 ? r.text() : NULL);
+            lines.append(TEXT`  "${entry.get("t").text()}" by ${strlen(mark) > 5 ? mark + 5 : mark}`);
+            dueText(&lines, age, releases, drop, "due");
+          }
+
+          yyjson_mut_doc_free(given);
+        }
+      } else if (dbmReleaseSettings(state, NULL, &releases, drop, why,
+                                    sizeof why) == 0) {
+
+        /* by migration, in the order they were registered */
+        yyjson_mut_doc *groups = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = yyjson_mut_obj(groups);
+
+        yyjson_mut_doc_set_root(groups, root);
+
+        for (int i = 0; i < registry.count(); ++i) {
+
+          json_t entry = registry.get(registry.keyAt(i));
+          const char *m = entry.get("m").text();
+          yyjson_mut_val *group = yyjson_mut_obj_get(root, m);
+
+          if (group == NULL) {
+            json_t r = entry.get("r");
+            group = yyjson_mut_obj(groups);
+            yyjson_mut_obj_add_int(groups, group, "age",
+                                   dbmReleaseAge(state, applied,
+                                                 strcmp(r.kind(), "string") == 0 ? r.text() : NULL));
+            yyjson_mut_obj_add_int(groups, group, "tables", 0);
+            yyjson_mut_obj_add(root, yyjson_mut_strcpy(groups, m), group);
+          }
+
+          yyjson_mut_val *tables = yyjson_mut_obj_get(group, "tables");
+          yyjson_mut_set_sint(tables, yyjson_mut_get_sint(tables) + 1);
+        }
+
+        yyjson_mut_obj_iter walk;
+        yyjson_mut_val *key;
+
+        yyjson_mut_obj_iter_init(root, &walk);
+
+        while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+          yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
+          lines.append(TEXT`  ${yyjson_mut_get_str(key)}: ${(long)yyjson_mut_get_sint(yyjson_mut_obj_get(group, "tables"))} table(s)`);
+          dueText(&lines, (long)yyjson_mut_get_sint(yyjson_mut_obj_get(group, "age")),
+                  releases, drop, "due");
+        }
+
+        yyjson_mut_doc_free(groups);
+      }
+
+      registry.release();
+    }
+
+    free(row);
+    section(k == 0 ? "Purges" : "Backups", &lines);
+  }
+
+  return 0;
+}

@@ -694,6 +694,13 @@ json_t dbmRunControl(void);
 int dbmCheck(driver_t *driver);
 
 /**
+ * What is pending, the latest release, the lock and the migration it was
+ * interrupted in, the background jobs, and what is deprecated or due to be
+ * purged or dropped - node's `status`, as its text. Changes nothing.
+ */
+int dbmStatus(driver_t *driver);
+
+/**
  * What dbmMigrateUp is told besides the connection; zeroed is node's
  * defaults: tables `migrations` and `migrations_state`, a lock taken over
  * after 60000 ms untouched, looked at every 1000 ms.
