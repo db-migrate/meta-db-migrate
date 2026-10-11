@@ -74,8 +74,8 @@ static const char *shown(const char *name) {
 
 static bool hasRun(json_t names, const char *name) {
 
-  for (int i = 0; i < names.count(); ++i)
-    if (strcmp(names[i].name, name) == 0)
+  for (record in names)
+    if (strcmp(record.name, name) == 0)
       return true;
 
   return false;
@@ -229,8 +229,11 @@ static void giveLock(driver_t *driver) {
 /* background jobs                                                    */
 /* ------------------------------------------------------------------ */
 
-/** The jobs as they are, `{"jobs":{...}}`. */
-static json_t jobsOf(driver_t *driver) {
+/**
+ * The jobs as they are, `{"jobs":{...}}` - the caller's, which `@owns` says
+ * so that meta releases it where the caller stops using it.
+ */
+@owns static json_t jobsOf(driver_t *driver) {
 
   char *text = driver->state != NULL ? dbmJobsRead(driver->state) : NULL;
   json_t jobs = meta_toJSON(text != NULL ? text : "{\"jobs\":{}}");
@@ -242,10 +245,10 @@ static json_t jobsOf(driver_t *driver) {
 /** Whether a migration runs in the background - its job not failed. */
 static bool inBackground(json_t jobs, const char *name) {
 
-  json_t job = jobs.get("jobs").get(dbmKeyOf(name));
+  json_t job = jobs.jobs[dbmKeyOf(name)];
 
   return strcmp(job.kind(), "object") == 0 &&
-         strcmp(job.get("s").text(), "failed") != 0;
+         strcmp(job.s.text(), "failed") != 0;
 }
 
 /** The scope's migration a job runs, by its key. */
@@ -333,11 +336,9 @@ static void releasesOf(driver_t *driver, json_t ran) {
 
   size_t total;
   const dbm_migration_t *migrations = dbmMigrations(&total);
-  yyjson_mut_doc *index = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *labels = yyjson_mut_obj(index);
+  json_t labels = {};
   release_at_t current = {NULL, 0};
 
-  yyjson_mut_doc_set_root(index, labels);
   release_at_t *fresh = calloc(total + 1, sizeof(release_at_t));
   release_at_t *old = releaseOf;
 
@@ -356,33 +357,29 @@ static void releasesOf(driver_t *driver, json_t ran) {
     if (label != NULL &&
         (current.label == NULL || strcmp(label, current.label) != 0)) {
 
-      yyjson_mut_val *known = yyjson_mut_obj_get(labels, label);
-
-      if (known == NULL) {
-        known = yyjson_mut_sint(index, (int64_t)yyjson_mut_obj_size(labels) + 1);
-        yyjson_mut_obj_add(labels, yyjson_mut_strcpy(index, label), known);
-      }
+      /* only ever one not seen yet, so `set` putting it last keeps their order */
+      if (labels[label].isNothing())
+        labels[label] = (long)labels.count() + 1;
 
       current.label = label;
-      current.index = (long)yyjson_mut_get_sint(known);
+      current.index = labels[label];
     }
 
     releaseOf[i] = current;
   }
 
-  char *written = yyjson_mut_write(index, 0, NULL);
+  char *written = labels.owned();
 
   releaseIndex.release();
   releaseIndex = (dbm_text_t){0};
   releaseIndex.put(written != NULL ? written : "{}");
   free(written);
-  yyjson_mut_doc_free(index);
 
   applied = 0;
 
-  for (int i = 0; releaseOf != NULL && i < ran.count(); ++i) {
-    long at = placeOf(named(ran[i].name));
-    if (at >= 0 && releaseOf[at].index > applied)
+  for (record in ran) {
+    long at = placeOf(named(record.name));
+    if (at >= 0 && releaseOf != NULL && releaseOf[at].index > applied)
       applied = releaseOf[at].index;
   }
 
@@ -441,9 +438,7 @@ void dbmJobRelease(driver_t *driver, const dbm_migration_t *migration) {
            TEXT`${migration->name}`);
   scope = own;
 
-  json_t none = meta_toJSON("[]");
-  releasesOf(driver, none);
-  none.release();
+  releasesOf(driver, []);
 
   long at = placeOf(migration);
 
@@ -581,16 +576,14 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
     return -1;
 
   bool pending = false;
-  json_t jobs = jobsOf(driver);
+  json_t earlier = jobsOf(driver);
 
   for (size_t i = 0; i < total && !pending; ++i)
     pending = inScope(migrations[i].name) &&
               !hasRun(names, migrations[i].name) &&
-              !inBackground(jobs, migrations[i].name) &&
+              !inBackground(earlier, migrations[i].name) &&
               (destination == NULL ||
                towards(migrations[i].name, destination) <= 0);
-
-  jobs.release();
 
   if (pending && !takeLock(driver, &names)) {
     names.release();
@@ -604,8 +597,7 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
   releasesOf(driver, names);
 
   /* read again, under the lock */
-  jobs = jobsOf(driver);
-  defer jobs.release();
+  json_t jobs = jobsOf(driver);
 
   for (size_t i = 0; i < total && (count == 0 || done < count); ++i) {
 
@@ -673,10 +665,8 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   if (!ready)
     return -1;
 
-  json_t jobs = jobsOf(driver);
-  bool pending = jobs.get("jobs").count() > 0;
-
-  jobs.release();
+  json_t earlier = jobsOf(driver);
+  bool pending = earlier.jobs.count() > 0;
 
   for (int i = names.count() - 1; i >= 0 && !pending; --i)
     pending = inScope(names[i].name) &&
@@ -694,19 +684,16 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   releasesOf(driver, names);
 
   /* the jobs first, still running: they are the newest, the last first */
-  jobs = jobsOf(driver);
-  defer jobs.release();
-
-  json_t list = jobs.get("jobs");
-  int all = list.count();
+  json_t jobs = jobsOf(driver);
+  json_t list = jobs.jobs;
   int jobCount = 0;
-  const char **keys = calloc((size_t)all + 1, sizeof(char *));
+  const char **keys = calloc((size_t)list.count() + 1, sizeof(char *));
   defer free(keys);
 
   /* the jobs of this scope: scopes sharing the database share the row */
-  for (int i = 0; keys != NULL && i < all; ++i)
-    if (strcmp(dbmJobScope(list.get(list.keyAt(i)), scope), scope) == 0)
-      keys[jobCount++] = list.keyAt(i);
+  for (job in list)
+    if (keys != NULL && strcmp(dbmJobScope(job, scope), scope) == 0)
+      keys[jobCount++] = job.keyOf();
 
   for (int i = 0; keys != NULL && i < jobCount; ++i)
     for (int j = i + 1; j < jobCount; ++j)
@@ -880,9 +867,7 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
   dbmStateForgetSchema(driver->state);
 
   /* the releases learned again from the first: none migrated yet */
-  json_t none = meta_toJSON("[]");
-  releasesOf(driver, none);
-  none.release();
+  releasesOf(driver, []);
 
   /* oldest first, as they were built */
   for (int i = 0; i < names.count(); ++i) {
@@ -990,7 +975,6 @@ int dbmStatus(driver_t *driver) {
   releasesOf(driver, names);
 
   json_t jobs = jobsOf(driver);
-  defer jobs.release();
 
   dbm_text_t lines = {0};
   defer lines.release();
@@ -1026,45 +1010,42 @@ int dbmStatus(driver_t *driver) {
       row != NULL) {
 
     json_t lock = meta_toJSON(row);
-    json_t s = lock.get("s");
-    json_t id = s.get("ID");
+    json_t s = lock.s;
+    json_t id = s.ID;
     bool held = (strcmp(id.kind(), "string") == 0 && id.text()[0] != '\0') ||
                 (strcmp(id.kind(), "number") == 0 && id.number() != 0);
-    bool interrupted = strcmp(s.get("fin").kind(), "number") == 0 &&
-                       s.get("fin").number() == 0 && s.get("f").text()[0] != '\0';
+    bool interrupted = strcmp(s.fin.kind(), "number") == 0 &&
+                       s.fin.number() == 0 && s.f.text()[0] != '\0';
 
     lines.release();
     lines = (dbm_text_t){0};
 
     if (held)
-      lines.append(TEXT`held since ${s.get("date").text()}`);
+      lines.append(TEXT`held since ${s.date.text()}`);
     else
       lines.put("free");
 
     if (interrupted)
-      lines.append(TEXT`, ${s.get("o").text()} of ${s.get("f").text()} interrupted at step ${s.get("step").number()}`);
+      lines.append(TEXT`, ${s.o.text()} of ${s.f.text()} interrupted at step ${s.step.number()}`);
 
     dbmSay(stdout, TEXT`Migration lock: ${lines.text}\n`);
-    lock.release();
   }
 
   free(row);
 
   /* the jobs, and whether a migration holds them paused */
-  yyjson_mut_doc *seen = yyjson_mut_doc_new(NULL);
-  yyjson_mut_doc_set_root(seen, yyjson_mut_obj(seen));
-
-  bool paused = dbmJobsPaused(state, seen);
-  json_t list = jobs.get("jobs");
+  json_t seen = {};
+  bool paused = dbmJobsPaused(state, seen._doc);
+  json_t list = jobs.jobs;
   const char **keys = calloc((size_t)list.count() + 1, sizeof(char *));
+  int known = 0;
 
-  yyjson_mut_doc_free(seen);
+  for (job in list)
+    if (keys != NULL)
+      keys[known++] = job.keyOf();
 
-  for (int i = 0; keys != NULL && i < list.count(); ++i)
-    keys[i] = list.keyAt(i);
-
-  for (int i = 0; keys != NULL && i < list.count(); ++i)
-    for (int j = i + 1; j < list.count(); ++j)
+  for (int i = 0; i < known; ++i)
+    for (int j = i + 1; j < known; ++j)
       if (strcmp(keys[j], keys[i]) < 0) {
         const char *swap = keys[i];
         keys[i] = keys[j];
@@ -1074,17 +1055,17 @@ int dbmStatus(driver_t *driver) {
   lines.release();
   lines = (dbm_text_t){0};
 
-  for (int i = 0; keys != NULL && i < list.count(); ++i) {
+  for (int i = 0; i < known; ++i) {
 
-    json_t job = list.get(keys[i]);
+    json_t job = list[keys[i]];
 
-    lines.append(TEXT`  ${keys[i]}: ${job.get("s").text()}${job.get("blocking").truth() ? ", blocking" : ""}`);
+    lines.append(TEXT`  ${keys[i]}: ${job.s.text()}${job.blocking.truth() ? ", blocking" : ""}`);
 
-    if (job.get("step").number() != 0)
-      lines.append(TEXT`, step ${job.get("step").number()}, ${job.get("done").number()} done`);
+    if (job.step.number() != 0)
+      lines.append(TEXT`, step ${job.step.number()}, ${job.done.number()} done`);
 
-    if (job.get("err").text()[0] != '\0')
-      lines.append(TEXT`, ${job.get("err").text()}`);
+    if (job.err.text()[0] != '\0')
+      lines.append(TEXT`, ${job.err.text()}`);
 
     lines.put("\n");
   }
@@ -1141,76 +1122,49 @@ int dbmStatus(driver_t *driver) {
 
       if (k == 0) {
 
-        for (int i = 0; i < registry.count(); ++i) {
+        for (entry in registry) {
 
-          const char *mark = registry.keyAt(i);
-          json_t entry = registry.get(mark);
-          json_t r = entry.get("r");
-          char o[200];
-          char *options = yyjson_mut_val_write(entry.get("o")._node, 0, NULL);
-          yyjson_mut_doc *given = yyjson_mut_doc_new(NULL);
-          yyjson_doc *parsed = options != NULL ? yyjson_read(options, strlen(options), 0) : NULL;
+          const char *mark = entry.keyOf();
+          json_t r = entry.r;
 
-          dbmWrite(o, sizeof o, TEXT`${options != NULL ? options : ""}`);
-          yyjson_mut_doc_set_root(given, parsed != NULL ? yyjson_val_mut_copy(given, yyjson_doc_get_root(parsed)) : NULL);
-          yyjson_doc_free(parsed);
-          free(options);
-
-          if (dbmReleaseSettings(state, yyjson_mut_doc_get_root(given), &releases,
-                                 drop, why, sizeof why) == 0) {
+          /* the entry's own options, read where they are */
+          if (dbmReleaseSettings(state, entry.o._node, &releases, drop, why,
+                                 sizeof why) == 0) {
             long age = dbmReleaseAge(state, applied,
                                      strcmp(r.kind(), "string") == 0 ? r.text() : NULL);
-            lines.append(TEXT`  "${entry.get("t").text()}" by ${strlen(mark) > 5 ? mark + 5 : mark}`);
+            lines.append(TEXT`  "${entry.t.text()}" by ${strlen(mark) > 5 ? mark + 5 : mark}`);
             dueText(&lines, age, releases, drop, "due");
           }
-
-          yyjson_mut_doc_free(given);
         }
       } else if (dbmReleaseSettings(state, NULL, &releases, drop, why,
                                     sizeof why) == 0) {
 
-        /* by migration, in the order they were registered */
-        yyjson_mut_doc *groups = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *root = yyjson_mut_obj(groups);
+        /* by migration, in the order they were registered: a migration
+           not seen yet goes last, which is where `set` puts a new key */
+        json_t groups = {};
 
-        yyjson_mut_doc_set_root(groups, root);
+        for (entry in registry) {
 
-        for (int i = 0; i < registry.count(); ++i) {
+          const char *m = entry.m;
 
-          json_t entry = registry.get(registry.keyAt(i));
-          const char *m = entry.get("m").text();
-          yyjson_mut_val *group = yyjson_mut_obj_get(root, m);
+          if (groups[m].isNothing()) {
+            json_t r = entry.r;
+            long age = dbmReleaseAge(state, applied,
+                                     strcmp(r.kind(), "string") == 0 ? r.text() : NULL);
 
-          if (group == NULL) {
-            json_t r = entry.get("r");
-            group = yyjson_mut_obj(groups);
-            yyjson_mut_obj_add_int(groups, group, "age",
-                                   dbmReleaseAge(state, applied,
-                                                 strcmp(r.kind(), "string") == 0 ? r.text() : NULL));
-            yyjson_mut_obj_add_int(groups, group, "tables", 0);
-            yyjson_mut_obj_add(root, yyjson_mut_strcpy(groups, m), group);
+            groups[m] = {age: age, tables: 0};
           }
 
-          yyjson_mut_val *tables = yyjson_mut_obj_get(group, "tables");
-          yyjson_mut_set_sint(tables, yyjson_mut_get_sint(tables) + 1);
+          json_t group = groups[m];
+
+          group.tables = group.tables.number() + 1;
         }
 
-        yyjson_mut_obj_iter walk;
-        yyjson_mut_val *key;
-
-        yyjson_mut_obj_iter_init(root, &walk);
-
-        while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-          yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
-          lines.append(TEXT`  ${yyjson_mut_get_str(key)}: ${(long)yyjson_mut_get_sint(yyjson_mut_obj_get(group, "tables"))} table(s)`);
-          dueText(&lines, (long)yyjson_mut_get_sint(yyjson_mut_obj_get(group, "age")),
-                  releases, drop, "due");
+        for (group in groups) {
+          lines.append(TEXT`  ${group.keyOf()}: ${group.tables.number()} table(s)`);
+          dueText(&lines, group.age, releases, drop, "due");
         }
-
-        yyjson_mut_doc_free(groups);
       }
-
-      registry.release();
     }
 
     free(row);
