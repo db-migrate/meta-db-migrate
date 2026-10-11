@@ -18,7 +18,9 @@ typedef enum direction { UP, DOWN } direction_t;
 
 /**
  * The names already run, with the table they are kept in made first - and
- * whether that worked, beside them rather than through a pointer.
+ * whether that worked, beside them rather than through a pointer. A failure
+ * still hands back whatever the driver had read by then, so the caller
+ * releases the names on both answers.
  */
 /** `--ignore-completed-migrations`: what ran is not read, as in node. */
 static bool ignoreCompleted;
@@ -206,8 +208,10 @@ static bool takeLock(driver_t *driver, json_t *names) {
 
   json_t again, bool ok = loaded(driver);
 
-  if (!ok)
+  if (!ok) {
+    again.release();
     return false;
+  }
 
   names->release();
   *names = again;
@@ -572,8 +576,10 @@ int dbmUp(driver_t *driver, size_t count, const char *destination,
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   bool pending = false;
   json_t earlier = jobsOf(driver);
@@ -662,8 +668,10 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   json_t earlier = jobsOf(driver);
   bool pending = earlier.jobs.count() > 0;
@@ -804,8 +812,10 @@ int dbmSync(driver_t *driver, const char *destination, bool dryRun) {
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   int newest = names.count() - 1;
 
@@ -852,8 +862,10 @@ int dbmFix(driver_t *driver, bool backup, bool dryRun) {
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   if (names.count() > 0 && !takeLock(driver, &names)) {
     names.release();
@@ -919,8 +931,10 @@ int dbmCheck(driver_t *driver) {
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   defer names.release();
 
@@ -967,8 +981,10 @@ int dbmStatus(driver_t *driver) {
 
   json_t names, bool ready = loaded(driver);
 
-  if (!ready)
+  if (!ready) {
+    names.release();
     return -1;
+  }
 
   defer names.release();
 
