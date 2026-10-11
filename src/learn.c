@@ -109,78 +109,124 @@ typedef struct {
   const char *table;
   const char *name;
   const char *other;
-  yyjson_mut_val *spec;
-  yyjson_mut_val *options;
+  json_t spec;
+  json_t options;
   bool unique;
 } step_t;
 
 /* ------------------------------------------------------------------ */
-/* JSON, the mutable kind                                             */
+/* JSON                                                               */
 /* ------------------------------------------------------------------ */
 
-static yyjson_mut_doc *schemaDoc(schema_t *self) {
-  return self->state->schema;
+/**
+ * A value of a document this file reads and writes but does not own, as a
+ * json_t: the schema is the state's and the record is the run's, and each is
+ * freed by whoever made it - both reach this file as yyjson's documents,
+ * because that is how the ABI hands them over.
+ *
+ * Built field by field, because the runtime has no way to name a value of a
+ * document somebody else holds: what makes a json_t is meta_toJSON or a
+ * literal, and both make a document of their own. `_shared` is the runtime's
+ * word for "not this value's to free", so a release - meta's or anybody's -
+ * leaves the document alone, and every key read through the view carries the
+ * word on. A NULL `doc` is a value only ever read: what is written into a
+ * document is allocated in the document written into.
+ */
+static json_t viewOf(yyjson_mut_doc *doc, yyjson_mut_val *node) {
+
+  json_t view;
+
+  memset(&view, 0, sizeof view);
+  view._doc = doc;
+  view._node = node;
+  view._key = "";
+  view._shared = 1;
+  return view;
 }
 
-static yyjson_mut_val *rootOf(yyjson_mut_doc *doc) {
-  return yyjson_mut_doc_get_root(doc);
+static json_t schemaOf(schema_t *self) {
+  yyjson_mut_doc *doc = self->state->schema;
+  return viewOf(doc, yyjson_mut_doc_get_root(doc));
+}
+
+static json_t recordOf(schema_t *self) {
+  return viewOf(self->record, yyjson_mut_doc_get_root(self->record));
+}
+
+/** Whether a key is missing - a key that holds null is there. */
+static bool absent(json_t value) {
+  return strcmp(value.kind(), "nothing") == 0;
+}
+
+static bool isObject(json_t value) {
+  return strcmp(value.kind(), "object") == 0;
+}
+
+/**
+ * `parent[key] = value`, a copy, in place of whatever was there and where it
+ * was - an absent value is written as null.
+ *
+ * Not `parent[key] = value` itself: json_t's set takes a key that is there
+ * out and adds it again at the end, and the schema and the record are written
+ * out as they are and read back by node, so where a key stands is part of
+ * what is written. yyjson's put replaces in place, and json_t has nothing
+ * that does.
+ */
+static void put(json_t parent, const char *key, json_t value) {
+
+  if (!isObject(parent))
+    return;
+
+  yyjson_mut_obj_put(parent._node, yyjson_mut_strcpy(parent._doc, key),
+                     value._node != NULL
+                         ? yyjson_mut_val_mut_copy(parent._doc, value._node)
+                         : yyjson_mut_null(parent._doc));
+}
+
+/**
+ * `parent[key] = made`, in place as put is, for a value made in parent's own
+ * document by objectIn or arrayIn: it is linked rather than copied.
+ */
+static void place(json_t parent, const char *key, json_t made) {
+  yyjson_mut_obj_put(parent._node, yyjson_mut_strcpy(parent._doc, key),
+                     made._node);
+}
+
+/**
+ * A new object, or array, in the document `beside` is in - filled through
+ * the view and then placed. Built where it will live rather than as a
+ * literal, which would be a document of its own, copied in and released.
+ */
+static json_t objectIn(json_t beside) {
+  return viewOf(beside._doc, yyjson_mut_obj(beside._doc));
+}
+
+static json_t arrayIn(json_t beside) {
+  return viewOf(beside._doc, yyjson_mut_arr(beside._doc));
 }
 
 /** The object under `key`, made if it is not there. */
-static yyjson_mut_val *child(yyjson_mut_doc *doc, yyjson_mut_val *parent,
-                             const char *key) {
+static json_t child(json_t parent, const char *key) {
 
-  yyjson_mut_val *found = yyjson_mut_obj_get(parent, key);
+  if (!isObject(parent[key]))
+    place(parent, key, objectIn(parent));
 
-  if (found != NULL && yyjson_mut_is_obj(found))
-    return found;
-
-  found = yyjson_mut_obj(doc);
-  yyjson_mut_obj_put(parent, yyjson_mut_strcpy(doc, key), found);
-  return found;
+  return parent[key];
 }
 
-/** `parent[key] = value`, a copy into `doc`, in place of whatever was there. */
-static void put(yyjson_mut_doc *doc, yyjson_mut_val *parent, const char *key,
-                yyjson_mut_val *value) {
-  yyjson_mut_obj_put(parent, yyjson_mut_strcpy(doc, key),
-                     value != NULL ? yyjson_mut_val_mut_copy(doc, value)
-                                   : yyjson_mut_null(doc));
-}
-
-static void removeKey(yyjson_mut_val *parent, const char *key) {
-  if (parent != NULL)
-    yyjson_mut_obj_remove_key(parent, key);
-}
-
-/** A document someone handed over, as a value of `doc`. */
-static yyjson_mut_val *copyIn(yyjson_mut_doc *doc, json_t value) {
-  return value._node != NULL ? yyjson_mut_val_mut_copy(doc, value._node)
-                            : yyjson_mut_obj(doc);
-}
-
-/** A value of the state, as a document a driver can read. The caller releases it. */
-static json_t asJson(yyjson_mut_val *value) {
-
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-
-  yyjson_mut_doc_set_root(doc, value != NULL
-                                   ? yyjson_mut_val_mut_copy(doc, value)
-                                   : yyjson_mut_obj(doc));
-  return meta_jsonFromMut(doc);
+/** A document someone handed over, copied into `into`'s - `{}` for nothing. */
+static json_t copyIn(json_t into, json_t value) {
+  return absent(value) ? objectIn(into)
+                       : viewOf(into._doc, yyjson_mut_val_mut_copy(
+                                               into._doc, value._node));
 }
 
 /** A column spec's `{columns: ...}` form, or the spec itself. */
-static yyjson_mut_val *columnsOf(yyjson_mut_val *table) {
+static json_t columnsOf(json_t table) {
 
-  yyjson_mut_val *columns = yyjson_mut_obj_get(table, "columns");
+  json_t columns = table.columns;
 
-  return columns != NULL && yyjson_mut_is_obj(columns) ? columns : table;
-}
-
-static const char *textOf(yyjson_mut_val *value) {
-  return value != NULL && yyjson_mut_is_str(value) ? yyjson_mut_get_str(value)
-                                                   : "";
+  return isObject(columns) ? columns : table;
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,7 +272,6 @@ static void record(schema_t *self, int type, dbm_action_t action,
     type = 2;
 
   yyjson_mut_doc *doc = self->record;
-  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(doc), "s");
   yyjson_mut_val *entry = yyjson_mut_obj(doc);
   yyjson_mut_val *args = yyjson_mut_arr(doc);
 
@@ -244,7 +289,7 @@ static void record(schema_t *self, int type, dbm_action_t action,
      its fix does not set */
   if (!self->fixing)
     yyjson_mut_obj_add_int(doc, entry, "n", self->counter);
-  yyjson_mut_arr_append(steps, entry);
+  yyjson_mut_arr_append(recordOf(self).s._node, entry);
 }
 
 /** One undo step whose arguments are not all names: `{t, a, c: args}`. */
@@ -263,7 +308,7 @@ static void recordWith(schema_t *self, int type, dbm_action_t action,
 
   if (!self->fixing)
     yyjson_mut_obj_add_int(doc, entry, "n", self->counter);
-  yyjson_mut_arr_append(yyjson_mut_obj_get(rootOf(doc), "s"), entry);
+  yyjson_mut_arr_append(recordOf(self).s._node, entry);
 }
 
 /** The schema and the record, written as they are now. Nothing on a dry run. */
@@ -299,9 +344,8 @@ static int travel(schema_t *self) {
 /* learning                                                           */
 /* ------------------------------------------------------------------ */
 
-static yyjson_mut_val *tableIn(schema_t *self, const char *table) {
-  return yyjson_mut_obj_get(yyjson_mut_obj_get(rootOf(schemaDoc(self)), "c"),
-                            table);
+static json_t tableIn(schema_t *self, const char *table) {
+  return schemaOf(self).c[table];
 }
 
 /**
@@ -331,19 +375,19 @@ static int unknownForeignKey(schema_t *self, const char *table,
 
 static bool hasColumn(schema_t *self, const char *table, const char *column) {
 
-  yyjson_mut_val *spec = tableIn(self, table);
+  json_t spec = tableIn(self, table);
 
-  return spec != NULL && (yyjson_mut_obj_get(spec, column) != NULL ||
-                          yyjson_mut_obj_get(columnsOf(spec), column) != NULL);
+  return !absent(spec) &&
+         (!absent(spec[column]) || !absent(columnsOf(spec)[column]));
 }
 
 static int needTable(schema_t *self, const char *table) {
-  return tableIn(self, table) == NULL ? unknownTable(self, table, false) : 0;
+  return absent(tableIn(self, table)) ? unknownTable(self, table, false) : 0;
 }
 
 static int needColumn(schema_t *self, const char *table, const char *column) {
 
-  if (tableIn(self, table) == NULL)
+  if (absent(tableIn(self, table)))
     return unknownTable(self, table, false);
 
   return hasColumn(self, table, column)
@@ -365,65 +409,55 @@ static void unquoted(const char *name, char *into, size_t room) {
 }
 
 /** The keys a table's columns declare, into the schema's `f`, as node keeps them. */
-static void learnColumnKeys(schema_t *self, const char *table,
-                            yyjson_mut_val *spec) {
+static void learnColumnKeys(schema_t *self, const char *table, json_t spec) {
 
-  yyjson_mut_doc *doc = schemaDoc(self);
-  yyjson_mut_val *key;
-  yyjson_mut_obj_iter walk;
+  if (!isObject(spec))
+    return;
 
-  yyjson_mut_obj_iter_init(spec, &walk);
+  for (column in spec) {
 
-  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+    json_t foreign = column.foreignKey;
 
-    yyjson_mut_val *column = yyjson_mut_obj_iter_get_val(key);
-    yyjson_mut_val *foreign = yyjson_mut_is_obj(column)
-                                  ? yyjson_mut_obj_get(column, "foreignKey")
-                                  : NULL;
-
-    if (foreign == NULL || !yyjson_mut_is_obj(foreign))
+    if (!isObject(foreign))
       continue;
 
-    yyjson_mut_val *keys = child(doc, child(doc, rootOf(doc), "f"), table);
-    yyjson_mut_val *entry = yyjson_mut_obj(doc);
-    yyjson_mut_val *rules = yyjson_mut_obj_get(foreign, "rules");
-    yyjson_mut_val *mapping = yyjson_mut_obj_get(foreign, "mapping");
+    json_t keys = child(child(schemaOf(self), "f"), table);
+    json_t entry = objectIn(keys);
+    json_t rules = foreign.rules;
+    json_t mapping = foreign.mapping;
 
-    yyjson_mut_obj_add_strcpy(doc, entry, "t", table);
-    yyjson_mut_obj_add_strcpy(doc, entry, "rt",
-                              textOf(yyjson_mut_obj_get(foreign, "table")));
+    entry.t = table;
+    entry.rt = foreign.table.text();
 
-    if (rules != NULL)
-      put(doc, entry, "r", rules);
+    if (!absent(rules))
+      entry.r = rules;
 
-    if (mapping != NULL && yyjson_mut_is_str(mapping)) {
-      yyjson_mut_val *m = yyjson_mut_obj(doc);
-      put(doc, m, yyjson_mut_get_str(key), mapping);
-      yyjson_mut_obj_add_val(doc, entry, "m", m);
+    if (strcmp(mapping.kind(), "string") == 0) {
+      json_t m = objectIn(keys);
+      m[column.keyOf()] = mapping;
+      place(entry, "m", m);
     } else {
-      put(doc, entry, "m", mapping);
+      entry.m = mapping;
     }
 
-    put(doc, keys, textOf(yyjson_mut_obj_get(foreign, "name")), entry);
+    put(keys, foreign.name.text(), entry);
   }
 }
 
 /** What a step does to the schema, and the step that undoes it. */
 static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
-  yyjson_mut_doc *doc = schemaDoc(self);
-  yyjson_mut_doc *mod = self->record;
-  yyjson_mut_val *schema = rootOf(doc);
-  yyjson_mut_val *kept = rootOf(mod);
-  yyjson_mut_val *c = child(doc, schema, "c");
-  yyjson_mut_val *f = child(doc, schema, "f");
-  yyjson_mut_val *i = child(doc, schema, "i");
+  json_t schema = schemaOf(self);
+  json_t kept = recordOf(self);
+  json_t c = child(schema, "c");
+  json_t f = child(schema, "f");
+  json_t i = child(schema, "i");
   const char *t = step->table;
 
   match (action) {
 
   case ACTION_CREATE_TABLE: {
-    put(doc, c, t, step->spec);
+    put(c, t, step->spec);
     learnColumnKeys(self, t, step->spec);
 
     const char *args[] = {t};
@@ -434,7 +468,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
   case ACTION_DROP_TABLE: {
 
     /* one the schema does not know: refused, or dropped beyond undoing */
-    if (tableIn(self, t) == NULL && !self->unlearn) {
+    if (absent(tableIn(self, t)) && !self->unlearn) {
       if (!self->irreversible)
         return unknownTable(self, t, true);
 
@@ -447,12 +481,12 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     for (size_t at = 0; at < countof(parts); ++at) {
 
-      yyjson_mut_val *from = yyjson_mut_obj_get(schema, parts[at]);
-      yyjson_mut_val *held = yyjson_mut_obj_get(from, t);
+      json_t from = schema[parts[at]];
+      json_t held = from[t];
 
-      if (held != NULL) {
-        put(mod, child(mod, kept, parts[at]), t, held);
-        removeKey(from, t);
+      if (!absent(held)) {
+        put(child(kept, parts[at]), t, held);
+        from.remove(t);
       }
     }
 
@@ -464,32 +498,32 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
   case ACTION_RENAME_TABLE: {
 
     const char *n = step->name;
-    yyjson_mut_val *parts[] = {c, f, i};
-    yyjson_mut_val *d = child(doc, schema, "d");
+    const char *const parts[] = {"c", "f", "i"};
+    json_t d = child(schema, "d");
     const char *const kinds[] = {"tables", "columns"};
 
     /* deprecations move with the table - unless it is renamed for its own
        deprecation, which stays under its name */
     for (size_t at = 0; at < countof(kinds); ++at) {
 
-      yyjson_mut_val *marks = yyjson_mut_obj_get(d, kinds[at]);
-      yyjson_mut_val *held = yyjson_mut_obj_get(marks, t);
-      bool own = at == 0 && held != NULL &&
-                 strcmp(textOf(yyjson_mut_obj_get(held, "to")), n) == 0;
+      json_t marks = d[kinds[at]];
+      json_t held = marks[t];
+      bool own = at == 0 && !absent(held) && strcmp(held.to.text(), n) == 0;
 
-      if (held != NULL && !own) {
-        put(doc, marks, n, held);
-        removeKey(marks, t);
+      if (!absent(held) && !own) {
+        put(marks, n, held);
+        marks.remove(t);
       }
     }
 
     for (size_t at = 0; at < countof(parts); ++at) {
 
-      yyjson_mut_val *held = yyjson_mut_obj_get(parts[at], t);
+      json_t part = schema[parts[at]];
+      json_t held = part[t];
 
-      if (held != NULL) {
-        put(doc, parts[at], n, held);
-        removeKey(parts[at], t);
+      if (!absent(held)) {
+        put(part, n, held);
+        part.remove(t);
       }
     }
 
@@ -503,7 +537,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needTable(self, t))
       return -1;
 
-    put(doc, columnsOf(tableIn(self, t)), step->name, step->spec);
+    put(columnsOf(tableIn(self, t)), step->name, step->spec);
 
     const char *args[] = {t, step->name};
     record(self, 0, ACTION_REMOVE_COLUMN, args, 2, NULL);
@@ -514,7 +548,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     if (!hasColumn(self, t, step->name) && !self->unlearn) {
       if (!self->irreversible)
-        return tableIn(self, t) == NULL
+        return absent(tableIn(self, t))
                    ? unknownTable(self, t, true)
                    : unknownColumn(self, t, step->name, true);
 
@@ -526,12 +560,10 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needColumn(self, t, step->name))
       return -1;
 
-    yyjson_mut_val *columns = columnsOf(tableIn(self, t));
-    yyjson_mut_val *column = yyjson_mut_obj_get(columns, step->name);
-    bool notNull = yyjson_mut_is_obj(column) &&
-                   yyjson_mut_is_true(yyjson_mut_obj_get(column, "notNull"));
-    const char *strategy =
-        textOf(yyjson_mut_obj_get(step->options, "columnStrategy"));
+    json_t columns = columnsOf(tableIn(self, t));
+    json_t column = columns[step->name];
+    bool notNull = isObject(column) && column.notNull.truth();
+    const char *strategy = step->options.columnStrategy.text();
 
     /**
      * A NOT NULL column cannot come back without a value for the rows that
@@ -550,30 +582,26 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     }
 
     /* beside what the migration removed from this table before, not over it */
-    yyjson_mut_val *was = child(mod, child(mod, kept, "c"), t);
+    json_t was = child(child(kept, "c"), t);
 
     if (notNull && !self->unlearn && strcmp(strategy, "delay") == 0) {
 
-      put(mod, was, step->name, column);
-
+      put(was, step->name, column);
       const char *args[] = {t, step->other, step->name};
       record(self, 0, ACTION_RENAME_COLUMN, args, 3, NULL);
     } else if (!self->unlearn) {
 
-      put(mod, was, step->name, column);
+      put(was, step->name, column);
 
-      if (notNull) {
-        yyjson_mut_val *passthrough =
-            yyjson_mut_obj_get(step->options, "passthrough");
-        put(mod, yyjson_mut_obj_get(was, step->name), "defaultValue",
-            yyjson_mut_obj_get(passthrough, "defaultValue"));
-      }
+      if (notNull)
+        put(was[step->name], "defaultValue",
+            step->options.passthrough.defaultValue);
 
       const char *args[] = {t, step->name};
-      record(self, 1, ACTION_ADD_COLUMN, args, 2, step->options);
+      record(self, 1, ACTION_ADD_COLUMN, args, 2, step->options._node);
     }
 
-    removeKey(columns, step->name);
+    columns.remove(step->name);
     return 0;
   }
 
@@ -582,11 +610,10 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needColumn(self, t, step->name))
       return -1;
 
-    yyjson_mut_val *columns = columnsOf(tableIn(self, t));
+    json_t columns = columnsOf(tableIn(self, t));
 
-    put(doc, columns, step->other, yyjson_mut_obj_get(columns, step->name));
-    removeKey(columns, step->name);
-
+    put(columns, step->other, columns[step->name]);
+    columns.remove(step->name);
     const char *args[] = {t, step->other, step->name};
     record(self, 0, ACTION_RENAME_COLUMN, args, 3, NULL);
     return 0;
@@ -597,34 +624,27 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needColumn(self, t, step->name))
       return -1;
 
-    yyjson_mut_val *columns = columnsOf(tableIn(self, t));
-    yyjson_mut_val *column = yyjson_mut_obj_get(columns, step->name);
+    json_t columns = columnsOf(tableIn(self, t));
+    json_t column = columns[step->name];
 
     /* undone: exactly the column as it was kept, not merged into the new */
     if (self->unlearn) {
-      yyjson_mut_obj_put(columns, yyjson_mut_strcpy(doc, step->name),
-                         yyjson_mut_val_mut_copy(doc, step->spec));
+      put(columns, step->name, step->spec);
       return 0;
     }
 
     /* the column as it was, which node meant to keep and did not */
-    put(mod, child(mod, child(mod, kept, "c"), t), step->name, column);
+    put(child(child(kept, "c"), t), step->name, column);
 
-    if (!yyjson_mut_is_obj(column)) {
-      yyjson_mut_val *spelled = yyjson_mut_obj(doc);
-      put(doc, spelled, "type", column);
-      yyjson_mut_obj_put(columns, yyjson_mut_strcpy(doc, step->name), spelled);
+    if (!isObject(column)) {
+      json_t spelled = objectIn(columns);
+      spelled.type = column;
+      place(columns, step->name, spelled);
       column = spelled;
     }
 
-    yyjson_mut_val *key;
-    yyjson_mut_obj_iter walk;
-
-    yyjson_mut_obj_iter_init(step->spec, &walk);
-
-    while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL)
-      put(doc, column, yyjson_mut_get_str(key),
-          yyjson_mut_obj_iter_get_val(key));
+    for (value in step->spec)
+      put(column, value.keyOf(), value);
 
     const char *args[] = {t, step->name};
     record(self, 1, ACTION_CHANGE_COLUMN, args, 2, NULL);
@@ -633,27 +653,25 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
   case ACTION_ADD_INDEX: {
 
-    for (size_t at = 0; at < yyjson_mut_arr_size(step->spec); ++at) {
+    for (column in step->spec) {
 
       char name[256];
 
-      unquoted(textOf(yyjson_mut_arr_get(step->spec, at)), name, sizeof name);
+      unquoted(column.text(), name, sizeof name);
 
       if (needColumn(self, t, name))
         return -1;
     }
 
-    yyjson_mut_val *index = yyjson_mut_obj(doc);
+    json_t index = objectIn(i);
 
-    yyjson_mut_obj_add_strcpy(doc, index, "t", t);
-    put(doc, index, "c", step->spec);
+    index.t = t;
+    index.c = step->spec;
 
     if (step->unique)
-      yyjson_mut_obj_add_bool(doc, index, "u", true);
+      index.u = true;
 
-    yyjson_mut_obj_put(child(doc, i, t), yyjson_mut_strcpy(doc, step->name),
-                       index);
-
+    place(child(i, t), step->name, index);
     const char *args[] = {t, step->name};
     record(self, 0, ACTION_REMOVE_INDEX, args, 2, NULL);
     return 0;
@@ -664,17 +682,13 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needTable(self, t))
       return -1;
 
-    yyjson_mut_val *index = yyjson_mut_obj_get(yyjson_mut_obj_get(i, t),
-                                               step->name);
+    json_t index = i[t][step->name];
 
-    if (index == NULL)
+    if (absent(index))
       return unknownIndex(self, t, step->name);
 
-    yyjson_mut_val *was = child(mod, child(mod, kept, "i"), t);
-
-    put(mod, was, step->name, index);
-    removeKey(yyjson_mut_obj_get(i, t), step->name);
-
+    put(child(child(kept, "i"), t), step->name, index);
+    i[t].remove(step->name);
     const char *args[] = {t, step->name};
     record(self, 1, ACTION_ADD_INDEX, args, 2, NULL);
     return 0;
@@ -685,18 +699,16 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needTable(self, t) || needTable(self, step->other))
       return -1;
 
-    yyjson_mut_val *entry = yyjson_mut_obj(doc);
+    json_t entry = objectIn(f);
 
-    yyjson_mut_obj_add_strcpy(doc, entry, "t", t);
-    yyjson_mut_obj_add_strcpy(doc, entry, "rt", step->other);
-    put(doc, entry, "m", step->spec);
+    entry.t = t;
+    entry.rt = step->other;
+    entry.m = step->spec;
 
-    if (step->options != NULL && yyjson_mut_obj_size(step->options) > 0)
-      put(doc, entry, "r", step->options);
+    if (isObject(step->options) && step->options.count() > 0)
+      entry.r = step->options;
 
-    yyjson_mut_obj_put(child(doc, f, t), yyjson_mut_strcpy(doc, step->name),
-                       entry);
-
+    place(child(f, t), step->name, entry);
     const char *args[] = {t, step->name};
     record(self, 0, ACTION_REMOVE_FOREIGN_KEY, args, 2, NULL);
     return 0;
@@ -704,12 +716,11 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
   case ACTION_REMOVE_FOREIGN_KEY: {
 
-    yyjson_mut_val *key = yyjson_mut_obj_get(yyjson_mut_obj_get(f, t),
-                                             step->name);
+    json_t key = f[t][step->name];
 
-    if (key == NULL && !self->unlearn) {
+    if (absent(key) && !self->unlearn) {
       if (!self->irreversible)
-        return tableIn(self, t) == NULL
+        return absent(tableIn(self, t))
                    ? unknownTable(self, t, true)
                    : unknownForeignKey(self, t, step->name, true);
 
@@ -721,13 +732,11 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needTable(self, t))
       return -1;
 
-    if (key == NULL)
+    if (absent(key))
       return unknownForeignKey(self, t, step->name, false);
 
-    yyjson_mut_val *was = child(mod, child(mod, kept, "f"), t);
-
-    put(mod, was, step->name, key);
-    removeKey(yyjson_mut_obj_get(f, t), step->name);
+    put(child(child(kept, "f"), t), step->name, key);
+    f[t].remove(step->name);
 
     /* node records nothing here, and so could not put the key back */
     const char *args[] = {t, step->name};
@@ -740,33 +749,27 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     /* d.tables[t] or d.columns[t][c] set to the entry, or cleared */
     const char *kind = step->other;
     const char *column = step->name;
-    yyjson_mut_val *marks = child(doc, child(doc, schema, "d"), kind);
-    yyjson_mut_val *holder = column != NULL ? child(doc, marks, t) : marks;
+    json_t marks = child(child(schema, "d"), kind);
+    json_t holder = column != NULL ? child(marks, t) : marks;
     const char *key = column != NULL ? column : t;
-    yyjson_mut_val *previous = yyjson_mut_obj_get(holder, key);
-    yyjson_mut_val *args = yyjson_mut_arr(mod);
 
-    yyjson_mut_arr_add_strcpy(mod, args, kind);
-    yyjson_mut_arr_add_strcpy(mod, args, t);
+    json_t args = arrayIn(kept);
 
-    if (column != NULL)
-      yyjson_mut_arr_add_strcpy(mod, args, column);
-    else
-      yyjson_mut_arr_add_null(mod, args);
+    /* a column of NULL and a mark that was not there are both null */
+    args.push(kind);
+    args.push(t);
+    args.push(column);
+    args.push(holder[key]);
 
-    yyjson_mut_arr_append(args, previous != NULL
-                                    ? yyjson_mut_val_mut_copy(mod, previous)
-                                    : yyjson_mut_null(mod));
-
-    if (step->spec != NULL && !yyjson_mut_is_null(step->spec)) {
-      put(doc, holder, key, step->spec);
+    if (!step->spec.isNothing()) {
+      put(holder, key, step->spec);
     } else {
-      removeKey(holder, key);
-      if (column != NULL && yyjson_mut_obj_size(holder) == 0)
-        removeKey(marks, t);
+      holder.remove(key);
+      if (column != NULL && holder.count() == 0)
+        marks.remove(t);
     }
 
-    recordWith(self, 2, ACTION_SET_DEPRECATED, args);
+    recordWith(self, 2, ACTION_SET_DEPRECATED, args._node);
     return 0;
   }
   }
@@ -787,12 +790,9 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
 
   match (action) {
 
-  case ACTION_CREATE_TABLE: {
-    json_t spec = asJson(step->spec);
-    answer = driver->createTable(driver, t, spec);
-    spec.release();
+  case ACTION_CREATE_TABLE:
+    answer = driver->createTable(driver, t, step->spec);
     break;
-  }
 
   case ACTION_DROP_TABLE:
     answer = driver->dropTable(driver, t, false);
@@ -802,12 +802,9 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
     answer = driver->renameTable(driver, t, step->name);
     break;
 
-  case ACTION_ADD_COLUMN: {
-    json_t spec = asJson(step->spec);
-    answer = driver->addColumn(driver, t, step->name, spec);
-    spec.release();
+  case ACTION_ADD_COLUMN:
+    answer = driver->addColumn(driver, t, step->name, step->spec);
     break;
-  }
 
   case ACTION_REMOVE_COLUMN:
 
@@ -821,31 +818,26 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
     answer = driver->renameColumn(driver, t, step->name, step->other);
     break;
 
-  case ACTION_CHANGE_COLUMN: {
-    json_t spec = asJson(step->spec);
-    answer = driver->changeColumn(driver, t, step->name, spec);
-    spec.release();
+  case ACTION_CHANGE_COLUMN:
+    answer = driver->changeColumn(driver, t, step->name, step->spec);
     break;
-  }
 
   case ACTION_ADD_INDEX: {
 
     /* written without the quotes node's pg driver left in its state */
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *names = yyjson_mut_arr(doc);
+    json_t columns = [];
 
-    for (size_t at = 0; at < yyjson_mut_arr_size(step->spec); ++at) {
+    for (column in step->spec) {
 
       char name[256];
 
-      unquoted(textOf(yyjson_mut_arr_get(step->spec, at)), name, sizeof name);
-      yyjson_mut_arr_add_strcpy(doc, names, name);
+      unquoted(column.text(), name, sizeof name);
+      columns.push(name);
     }
 
-    yyjson_mut_doc_set_root(doc, names);
-
-    json_t columns = meta_jsonFromMut(doc);
     answer = driver->addIndex(driver, t, step->name, columns, step->unique);
+
+    /* a driver is called through a pointer, which meta reads as keeping */
     columns.release();
     break;
   }
@@ -855,12 +847,11 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
     break;
 
   case ACTION_ADD_FOREIGN_KEY: {
-    json_t mapping = asJson(step->spec);
-    json_t rules = asJson(step->options);
-    answer = driver->addForeignKey(driver, t, step->other, step->name, mapping,
-                                   rules);
-    mapping.release();
-    rules.release();
+
+    /* a key kept without rules is added with none: `{}` */
+    answer = driver->addForeignKey(driver, t, step->other, step->name,
+                                   step->spec,
+                                   copyIn(schemaOf(self), step->options));
     break;
   }
 
@@ -966,18 +957,14 @@ static int perform(schema_t *self, dbm_action_t action, step_t *step) {
 
 int schema_t__createTable(schema_t *self, const char *table, json_t spec) {
 
-  step_t step = {.table = table};
-
-  step.spec = copyIn(schemaDoc(self), spec);
+  step_t step = {.table = table, .spec = copyIn(schemaOf(self), spec)};
 
   /* node's convention: every table a v2 migration makes carries this column -
      one adopted was not made by one, and has what it has */
-  if (!self->adopting &&
-      yyjson_mut_obj_get(step.spec, "__dbmigrate__flag") == NULL) {
-    yyjson_mut_val *flag = yyjson_mut_obj(schemaDoc(self));
-    yyjson_mut_obj_add_str(schemaDoc(self), flag, "type", "string");
-    yyjson_mut_obj_add_val(schemaDoc(self), step.spec, "__dbmigrate__flag",
-                           flag);
+  if (!self->adopting && absent(step.spec["__dbmigrate__flag"])) {
+    json_t flag = objectIn(step.spec);
+    flag.type = "string";
+    place(step.spec, "__dbmigrate__flag", flag);
   }
 
   return perform(self, ACTION_CREATE_TABLE, &step);
@@ -1017,8 +1004,8 @@ int schema_t__renameTable(schema_t *self, const char *from, const char *to) {
 
 int schema_t__addColumn(schema_t *self, const char *table, const char *column,
                         json_t spec) {
-  step_t step = {.table = table, .name = column};
-  step.spec = copyIn(schemaDoc(self), spec);
+  step_t step = {.table = table, .name = column,
+                 .spec = copyIn(schemaOf(self), spec)};
   return perform(self, ACTION_ADD_COLUMN, &step);
 }
 
@@ -1026,19 +1013,16 @@ int schema_t__removeColumnWith(schema_t *self, const char *table,
                                const char *column, json_t options) {
 
   char renamed[300];
-  step_t step = {.table = table, .name = column};
-
-  step.options = copyIn(self->record, options);
+  step_t step = {.table = table, .name = column,
+                 .options = copyIn(recordOf(self), options)};
 
   /* `delay` renames it out of the way, under node's name for that */
-  if (strcmp(textOf(yyjson_mut_obj_get(step.options, "columnStrategy")),
-             "delay") == 0) {
+  if (strcmp(step.options.columnStrategy.text(), "delay") == 0) {
 
-    const char *given = textOf(yyjson_mut_obj_get(
-        yyjson_mut_obj_get(step.options, "passthrough"), "column"));
+    const char *chosen = step.options.passthrough.column;
 
-    if (given[0] != '\0') {
-      dbmWrite(renamed, sizeof renamed, TEXT`${given}`);
+    if (chosen[0] != '\0') {
+      dbmWrite(renamed, sizeof renamed, TEXT`${chosen}`);
     } else {
       char date[40];
       time_t now = time(NULL);
@@ -1068,8 +1052,8 @@ int schema_t__renameColumn(schema_t *self, const char *table, const char *from,
 
 int schema_t__changeColumn(schema_t *self, const char *table,
                            const char *column, json_t spec) {
-  step_t step = {.table = table, .name = column};
-  step.spec = copyIn(schemaDoc(self), spec);
+  step_t step = {.table = table, .name = column,
+                 .spec = copyIn(schemaOf(self), spec)};
   return perform(self, ACTION_CHANGE_COLUMN, &step);
 }
 
@@ -1080,10 +1064,10 @@ static int addIndex(schema_t *self, const char *table, const char *name,
 
   /* `"name"` and `["name"]` are the same index, kept as the second */
   if (strcmp(columns.kind(), "string") == 0) {
-    step.spec = yyjson_mut_arr(schemaDoc(self));
-    yyjson_mut_arr_add_strcpy(schemaDoc(self), step.spec, columns.text());
+    step.spec = arrayIn(schemaOf(self));
+    step.spec.push(columns.text());
   } else {
-    step.spec = copyIn(schemaDoc(self), columns);
+    step.spec = copyIn(schemaOf(self), columns);
   }
 
   return perform(self, ACTION_ADD_INDEX, &step);
@@ -1110,8 +1094,8 @@ int schema_t__addForeignKey(schema_t *self, const char *table,
 
   step_t step = {.table = table, .name = name, .other = referenced};
 
-  step.spec = copyIn(schemaDoc(self), mapping);
-  step.options = copyIn(schemaDoc(self), rules);
+  step.spec = copyIn(schemaOf(self), mapping);
+  step.options = copyIn(schemaOf(self), rules);
   return perform(self, ACTION_ADD_FOREIGN_KEY, &step);
 }
 
@@ -1133,9 +1117,9 @@ int schema_t__removeForeignKeyWith(schema_t *self, const char *table,
 int dbmSchemaSetDeprecated(schema_t *self, const char *kind, const char *table,
                            const char *column, yyjson_mut_val *entry) {
 
-  step_t step = {.table = table, .name = column, .other = kind};
+  step_t step = {.table = table, .name = column, .other = kind,
+                 .spec = viewOf(NULL, entry)};
 
-  step.spec = entry;
   return perform(self, ACTION_SET_DEPRECATED, &step);
 }
 
@@ -1154,31 +1138,26 @@ int dbmSchemaDropDeprecated(schema_t *self, const dbm_deprecated_t *item) {
 static yyjson_mut_val *deprecation(schema_t *self, const char *name,
                                    json_t options) {
 
-  yyjson_mut_doc *doc = schemaDoc(self);
-  yyjson_mut_val *entry = yyjson_mut_obj(doc);
-  yyjson_mut_val *given = yyjson_mut_obj(doc);
-  const char *release = self->state->releaseLabel;
+  json_t entry = objectIn(schemaOf(self));
+  json_t given = objectIn(entry);
   char to[300];
   char why[300];
 
-  if (dbmReleaseOptions(options, doc, given, why, sizeof why)) {
+  /* the options are checked and written by release.c, which takes yyjson's */
+  if (dbmReleaseOptions(options, given._doc, given._node, why, sizeof why)) {
     fail(self, TEXT`${why}`);
     return NULL;
   }
 
   dbmHiddenName(name, self->name, to, sizeof to);
 
-  if (release != NULL)
-    yyjson_mut_obj_add_strcpy(doc, entry, "r", release);
-  else
-    yyjson_mut_obj_add_null(doc, entry, "r");
+  entry.r = self->state->releaseLabel;
+  entry.to = to;
 
-  yyjson_mut_obj_add_strcpy(doc, entry, "to", to);
+  if (given.count() > 0)
+    place(entry, "o", given);
 
-  if (yyjson_mut_obj_size(given) > 0)
-    yyjson_mut_obj_add_val(doc, entry, "o", given);
-
-  return entry;
+  return entry._node;
 }
 
 int schema_t__deprecateTableWith(schema_t *self, const char *table,
@@ -1187,7 +1166,7 @@ int schema_t__deprecateTableWith(schema_t *self, const char *table,
   if (self->failed)
     return -1;
 
-  if (tableIn(self, table) == NULL)
+  if (absent(tableIn(self, table)))
     return unknownTable(self, table, false);
 
   yyjson_mut_val *entry = deprecation(self, table, options);
@@ -1207,13 +1186,12 @@ int schema_t__deprecateColumnWith(schema_t *self, const char *table,
   if (self->failed)
     return -1;
 
-  if (tableIn(self, table) == NULL)
+  if (absent(tableIn(self, table)))
     return unknownTable(self, table, false);
 
-  yyjson_mut_val *spec = yyjson_mut_obj_get(columnsOf(tableIn(self, table)),
-                                            column);
+  json_t spec = columnsOf(tableIn(self, table))[column];
 
-  if (spec == NULL)
+  if (absent(spec))
     return unknownColumn(self, table, column, false);
 
   yyjson_mut_val *entry = deprecation(self, column, options);
@@ -1222,23 +1200,15 @@ int schema_t__deprecateColumnWith(schema_t *self, const char *table,
     return -1;
 
   /* the application stops writing it: NOT NULL relaxed, by the whole spec,
-     as MySQL changes a column */
-  if (yyjson_mut_is_obj(spec) &&
-      yyjson_mut_is_true(yyjson_mut_obj_get(spec, "notNull"))) {
+     as MySQL changes a column - where it stood, which set would not keep */
+  if (isObject(spec) && spec.notNull.truth()) {
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *relaxed = yyjson_mut_val_mut_copy(doc, spec);
+    json_t relaxed = {spec: spec};
 
-    yyjson_mut_obj_put(relaxed, yyjson_mut_str(doc, "notNull"),
-                       yyjson_mut_false(doc));
-    yyjson_mut_doc_set_root(doc, relaxed);
+    yyjson_mut_obj_put(relaxed.spec._node, yyjson_mut_str(relaxed._doc, "notNull"),
+                       yyjson_mut_false(relaxed._doc));
 
-    json_t changed = meta_jsonFromMut(doc);
-    int answer = self->changeColumn(table, column, changed);
-
-    changed.release();
-
-    if (answer != 0)
+    if (self->changeColumn(table, column, relaxed.spec) != 0)
       return -1;
   }
 
@@ -1346,7 +1316,7 @@ int schema_adopt_t__createTable(schema_adopt_t *self, const char *table,
   if (self->db->failed)
     return -1;
 
-  if (tableIn(self->db, table) != NULL)
+  if (!absent(tableIn(self->db, table)))
     return known(self->db, TEXT`createTable("${table}")`);
 
   return DBM_ADOPTING(self->db, schema_t__createTable(self->db, table, spec));
@@ -1368,13 +1338,10 @@ int schema_adopt_t__addColumn(schema_adopt_t *self, const char *table,
 int schema_adopt_t__addIndex(schema_adopt_t *self, const char *table,
                              const char *name, json_t columns) {
 
-  yyjson_mut_val *indexes = yyjson_mut_obj_get(
-      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "i"), table);
-
   if (self->db->failed)
     return -1;
 
-  if (yyjson_mut_obj_get(indexes, name) != NULL)
+  if (!absent(schemaOf(self->db).i[table][name]))
     return known(self->db, TEXT`addIndex("${table}", "${name}")`);
 
   return DBM_ADOPTING(self->db,
@@ -1384,13 +1351,10 @@ int schema_adopt_t__addIndex(schema_adopt_t *self, const char *table,
 int schema_adopt_t__addUniqueIndex(schema_adopt_t *self, const char *table,
                                    const char *name, json_t columns) {
 
-  yyjson_mut_val *indexes = yyjson_mut_obj_get(
-      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "i"), table);
-
   if (self->db->failed)
     return -1;
 
-  if (yyjson_mut_obj_get(indexes, name) != NULL)
+  if (!absent(schemaOf(self->db).i[table][name]))
     return known(self->db, TEXT`addIndex("${table}", "${name}")`);
 
   return DBM_ADOPTING(self->db,
@@ -1401,13 +1365,10 @@ int schema_adopt_t__addForeignKey(schema_adopt_t *self, const char *table,
                                   const char *referenced, const char *name,
                                   json_t mapping, json_t rules) {
 
-  yyjson_mut_val *keys = yyjson_mut_obj_get(
-      yyjson_mut_obj_get(rootOf(schemaDoc(self->db)), "f"), table);
-
   if (self->db->failed)
     return -1;
 
-  if (yyjson_mut_obj_get(keys, name) != NULL)
+  if (!absent(schemaOf(self->db).f[table][name]))
     return known(self->db, TEXT`addForeignKey("${table}", "${referenced}", "${name}")`);
 
   return DBM_ADOPTING(self->db,
@@ -1428,20 +1389,16 @@ static int undo(schema_t *self, dbm_action_t action, step_t *step) {
   return send(self, action, step);
 }
 
-static const char *argument(yyjson_mut_val *args, size_t at) {
-  return textOf(yyjson_mut_arr_get(args, at));
-}
-
 /**
  * A table back as it was: from the columns kept in the record, then its
  * indexes and the keys its columns did not declare themselves.
  */
 static int rebuildTable(schema_t *self, const char *t) {
 
-  yyjson_mut_val *kept = rootOf(self->record);
-  yyjson_mut_val *spec = yyjson_mut_obj_get(child(self->record, kept, "c"), t);
+  json_t kept = recordOf(self);
+  json_t spec = child(kept, "c")[t];
 
-  if (spec == NULL)
+  if (absent(spec))
     return fail(self, TEXT`the state does not say what ${t} looked like`);
 
   step_t create = {.table = t, .spec = spec};
@@ -1450,48 +1407,29 @@ static int rebuildTable(schema_t *self, const char *t) {
     return -1;
 
   /* the keys the columns declare were made with the table */
-  yyjson_mut_val *keys = yyjson_mut_obj_get(child(self->record, kept, "f"), t);
-  yyjson_mut_val *column;
-  yyjson_mut_obj_iter walk;
+  json_t keys = child(kept, "f")[t];
 
-  yyjson_mut_obj_iter_init(columnsOf(spec), &walk);
+  for (column in columnsOf(spec)) {
 
-  while ((column = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+    json_t declared = column.foreignKey;
 
-    yyjson_mut_val *declared = yyjson_mut_obj_get(
-        yyjson_mut_obj_iter_get_val(column), "foreignKey");
-
-    if (declared != NULL)
-      removeKey(keys, textOf(yyjson_mut_obj_get(declared, "name")));
+    if (!absent(declared))
+      keys.remove(declared.name.text());
   }
 
-  yyjson_mut_val *indexes = yyjson_mut_obj_get(child(self->record, kept, "i"), t);
-  yyjson_mut_val *name;
+  for (index in child(kept, "i")[t]) {
 
-  yyjson_mut_obj_iter_init(indexes, &walk);
-
-  while ((name = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    yyjson_mut_val *index = yyjson_mut_obj_iter_get_val(name);
-    step_t step = {.table = t, .name = yyjson_mut_get_str(name)};
-
-    step.spec = yyjson_mut_obj_get(index, "c");
-    step.unique = yyjson_mut_is_true(yyjson_mut_obj_get(index, "u"));
+    step_t step = {.table = t, .name = index.keyOf(), .spec = index.c,
+                   .unique = index.u.truth()};
 
     if (undo(self, ACTION_ADD_INDEX, &step))
       return -1;
   }
 
-  yyjson_mut_obj_iter_init(keys, &walk);
+  for (key in keys) {
 
-  while ((name = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    yyjson_mut_val *key = yyjson_mut_obj_iter_get_val(name);
-    step_t step = {.table = t, .name = yyjson_mut_get_str(name)};
-
-    step.other = textOf(yyjson_mut_obj_get(key, "rt"));
-    step.spec = yyjson_mut_obj_get(key, "m");
-    step.options = yyjson_mut_obj_get(key, "r");
+    step_t step = {.table = t, .name = key.keyOf(), .other = key.rt.text(),
+                   .spec = key.m, .options = key.r};
 
     if (undo(self, ACTION_ADD_FOREIGN_KEY, &step))
       return -1;
@@ -1500,32 +1438,39 @@ static int rebuildTable(schema_t *self, const char *t) {
   return 0;
 }
 
-/** One recorded undo step, `{t, a, c}`. */
-static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
+/**
+ * A whole number the record holds - `t`, `n` - and 0 for anything else, as
+ * it was read before: `number()` alone would also read `true` as 1 and `"3"`
+ * as 3, which a record written by hand could hold.
+ */
+static long integerOf(json_t value) {
+  return strcmp(value.kind(), "number") == 0 ? value.number() : 0;
+}
 
-  yyjson_mut_val *kept = rootOf(self->record);
-  long type = yyjson_mut_get_int(yyjson_mut_obj_get(entry, "t"));
-  const char *named = textOf(yyjson_mut_obj_get(entry, "a"));
-  yyjson_mut_val *args = yyjson_mut_obj_get(entry, "c");
+/** One recorded undo step, `{t, a, c}`. */
+static int undoEntry(schema_t *self, json_t entry) {
+
+  json_t kept = recordOf(self);
+  long type = integerOf(entry.t);
+  const char *named = entry.a;
+  json_t args = entry.c;
   int found = (int)fromspelling(enum dbmAction, named);
 
   if (found < 0 || !(type in {0, 1, 2}))
     return fail(self, TEXT`Invalid state record, of type ${type}: ${named}`);
 
   dbm_action_t action = (dbm_action_t)found;
-  step_t step = {.table = argument(args, 0)};
+  step_t step = {.table = args[0].text()};
 
   /* a mark, put back as it was before */
   if (action == ACTION_SET_DEPRECATED) {
 
-    yyjson_mut_val *column = yyjson_mut_arr_get(args, 2);
+    json_t column = args[2];
 
-    step.other = argument(args, 0);
-    step.table = argument(args, 1);
-    step.name = column != NULL && yyjson_mut_is_str(column)
-                    ? yyjson_mut_get_str(column)
-                    : NULL;
-    step.spec = yyjson_mut_arr_get(args, 3);
+    step.other = args[0].text();
+    step.table = args[1].text();
+    step.name = strcmp(column.kind(), "string") == 0 ? column.text() : NULL;
+    step.spec = args[3];
     return learn(self, action, &step);
   }
 
@@ -1535,17 +1480,17 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
     /* called as it was recorded */
     match (action) {
     case ACTION_RENAME_TABLE:
-      step.name = argument(args, 1);
+      step.name = args[1].text();
       break;
     case ACTION_RENAME_COLUMN:
-      step.name = argument(args, 1);
-      step.other = argument(args, 2);
+      step.name = args[1].text();
+      step.other = args[2].text();
       break;
     case ACTION_DROP_TABLE:
       break;
     case ACTION_REMOVE_COLUMN, ACTION_REMOVE_INDEX,
         ACTION_REMOVE_FOREIGN_KEY:
-      step.name = argument(args, 1);
+      step.name = args[1].text();
       break;
     default:
       return fail(self, TEXT`a ${named} step cannot be undone as it stands`);
@@ -1555,7 +1500,7 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
   }
 
   /* rebuilt from what the record kept */
-  step.name = argument(args, 1);
+  step.name = args[1].text();
 
   match (action) {
 
@@ -1563,43 +1508,37 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
     return rebuildTable(self, step.table);
 
   case ACTION_ADD_COLUMN, ACTION_CHANGE_COLUMN:
-    step.spec = yyjson_mut_obj_get(
-        yyjson_mut_obj_get(child(self->record, kept, "c"), step.table),
-        step.name);
+    step.spec = child(kept, "c")[step.table][step.name];
 
-    if (step.spec == NULL)
+    if (absent(step.spec))
       return fail(self, TEXT`the state does not say what ${step.table}.${step.name} looked like`);
 
     return undo(self, action, &step);
 
   case ACTION_ADD_INDEX: {
 
-    yyjson_mut_val *index = yyjson_mut_obj_get(
-        yyjson_mut_obj_get(child(self->record, kept, "i"), step.table),
-        step.name);
+    json_t index = child(kept, "i")[step.table][step.name];
 
-    if (index == NULL) {
+    if (absent(index)) {
       dbmSay(stderr, TEXT`[WARN] There was an attempt to create the index "${step.name}" in the table "${step.table}". This index did not exist at the time of deleting it - recreate it by hand if it was made by hand.\n`);
       return 0;
     }
 
-    step.spec = yyjson_mut_obj_get(index, "c");
-    step.unique = yyjson_mut_is_true(yyjson_mut_obj_get(index, "u"));
+    step.spec = index.c;
+    step.unique = index.u.truth();
     return undo(self, action, &step);
   }
 
   case ACTION_ADD_FOREIGN_KEY: {
 
-    yyjson_mut_val *key = yyjson_mut_obj_get(
-        yyjson_mut_obj_get(child(self->record, kept, "f"), step.table),
-        step.name);
+    json_t key = child(kept, "f")[step.table][step.name];
 
-    if (key == NULL)
+    if (absent(key))
       return fail(self, TEXT`the state does not say what foreign key ${step.name} was`);
 
-    step.other = textOf(yyjson_mut_obj_get(key, "rt"));
-    step.spec = yyjson_mut_obj_get(key, "m");
-    step.options = yyjson_mut_obj_get(key, "r");
+    step.other = key.rt.text();
+    step.spec = key.m;
+    step.options = key.r;
     return undo(self, action, &step);
   }
 
@@ -1616,19 +1555,19 @@ static int undoEntry(schema_t *self, yyjson_mut_val *entry) {
  */
 static int undoAll(schema_t *self) {
 
-  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
+  json_t steps = recordOf(self).s;
   bool unlearn = self->unlearn;
 
   self->unlearn = true;
 
-  while (yyjson_mut_arr_size(steps) > 0) {
+  while (steps.count() > 0) {
 
-    yyjson_mut_val *entry = yyjson_mut_arr_get_last(steps);
-
-    if (undoEntry(self, entry))
+    if (undoEntry(self, steps[steps.count() - 1]))
       break;
 
-    yyjson_mut_arr_remove_last(steps);
+    /* raw: json_t takes a key out of an object, and has no word for taking
+       a position out of an array */
+    yyjson_mut_arr_remove_last(steps._node);
 
     if (save(self))
       break;
@@ -1679,11 +1618,8 @@ yyjson_mut_doc *dbmRecordFrom(const char *text) {
 }
 
 /** The step an undo entry belongs to: `n`, or 0 for one an older run wrote. */
-static long stepOf(yyjson_mut_val *entry) {
-
-  yyjson_mut_val *n = yyjson_mut_obj_get(entry, "n");
-
-  return n != NULL && yyjson_mut_is_int(n) ? (long)yyjson_mut_get_sint(n) : 0;
+static long stepOf(json_t entry) {
+  return integerOf(entry.n);
 }
 
 /**
@@ -1694,17 +1630,17 @@ static long stepOf(yyjson_mut_val *entry) {
 static void keepExecuted(schema_t *self, long done, long failed,
                          bool signaled) {
 
-  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
-  size_t at = 0;
+  json_t steps = recordOf(self).s;
+  int at = 0;
 
-  while (at < yyjson_mut_arr_size(steps)) {
+  while (at < steps.count()) {
 
-    long n = stepOf(yyjson_mut_arr_get(steps, at));
+    long n = stepOf(steps[at]);
 
     if (n <= done || (signaled && failed > done && n == failed))
       ++at;
     else
-      yyjson_mut_arr_remove(steps, at);
+      yyjson_mut_arr_remove(steps._node, (size_t)at); /* raw, as in undoAll */
   }
 }
 
@@ -1755,27 +1691,23 @@ static const char *recoveryOf(const dbm_migration_t *migration,
  */
 static void irreversibleSteps(schema_t *self, char *into, size_t room) {
 
-  yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(self->record), "s");
   dbm_text_t said = {0};
   defer said.release();
 
   into[0] = '\0';
 
-  for (size_t at = 0; at < yyjson_mut_arr_size(steps); ++at) {
+  for (entry in recordOf(self).s) {
 
-    yyjson_mut_val *entry = yyjson_mut_arr_get(steps, at);
-    yyjson_mut_val *args = yyjson_mut_obj_get(entry, "c");
-
-    if (yyjson_mut_get_int(yyjson_mut_obj_get(entry, "t")) != 3)
+    if (integerOf(entry.t) != 3)
       continue;
 
-    said.append(TEXT`${said.length > 0 ? ", " : ""}step ${stepOf(entry)} ${textOf(yyjson_mut_obj_get(entry, "a"))}(`);
+    said.append(TEXT`${said.length > 0 ? ", " : ""}step ${stepOf(entry)} ${entry.a.text()}(`);
 
-    for (size_t i = 0; i < yyjson_mut_arr_size(args); ++i) {
-      yyjson_mut_val *arg = yyjson_mut_arr_get(args, i);
-      if (yyjson_mut_is_str(arg))
-        said.append(TEXT`${i > 0 ? ", " : ""}"${yyjson_mut_get_str(arg)}"`);
-    }
+    json_t args = entry.c;
+
+    for (int i = 0; i < args.count(); ++i)
+      if (strcmp(args[i].kind(), "string") == 0)
+        said.append(TEXT`${i > 0 ? ", " : ""}"${args[i].text()}"`);
 
     said.put(")");
   }
