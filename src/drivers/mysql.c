@@ -127,7 +127,8 @@ static yyjson_mut_val *valueOf(yyjson_mut_doc *doc, const MYSQL_FIELD *field,
 /**
  * The rows of an executed statement, every column fetched as text into a
  * buffer as long as the longest value - which the server only says once
- * asked to measure, before the rows are stored.
+ * asked to measure, before the rows are stored. With yyjson, for what pg.c's
+ * rowsOf says.
  */
 static int rowsOf(driver_t *self, MYSQL_STMT *statement, json_t *rows) {
 
@@ -343,7 +344,7 @@ static int myColumnConstraint(driver_t *self, dbm_text_t *out,
   (void)column;
 
   /* `unsigned` is a word of C, so it is asked for by name */
-  if (spec.get("unsigned").truth())
+  if (spec["unsigned"].truth())
     out->put(" UNSIGNED");
 
   if (charset[0] != '\0') {

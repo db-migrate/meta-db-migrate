@@ -81,6 +81,11 @@ static int pgRunSql(driver_t *self, const char *text) {
  * integers, reals - and is text everywhere else, which is what libpq hands
  * over anyway. `numeric` stays text on purpose: a decimal that went through a
  * double is a different number.
+ *
+ * Built with yyjson rather than json_t, as all three drivers build theirs: a
+ * result may name a column twice - a join's two `id`s - and a row keeps both,
+ * where json_t's `set` would fold them into one; and a row is made where it
+ * goes rather than built apart and copied in, once per row of every query.
  */
 static json_t rowsOf(PGresult *result) {
 

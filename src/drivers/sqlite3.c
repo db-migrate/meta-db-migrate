@@ -58,7 +58,10 @@ static int liteRunSql(driver_t *self, const char *text) {
   return answer;
 }
 
-/** A row as an object, each value by the kind SQLite stored it as. */
+/**
+ * A row as an object, each value by the kind SQLite stored it as. With
+ * yyjson, for what pg.c's rowsOf says.
+ */
 static yyjson_mut_val *rowOf(yyjson_mut_doc *doc, sqlite3_stmt *statement) {
 
   yyjson_mut_val *row = yyjson_mut_obj(doc);

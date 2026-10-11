@@ -121,6 +121,11 @@ static yyjson_mut_val *scalar(yyjson_mut_doc *out, yaml_node_t *node) {
   return yyjson_mut_strcpy(out, text);
 }
 
+/**
+ * Built with yyjson rather than json_t: a node is made before the place it
+ * goes, and the root may be any value - json_t writes into an object or an
+ * array that is already there.
+ */
 static yyjson_mut_val *converted(yyjson_mut_doc *out, yaml_document_t *document,
                                  yaml_node_t *node, int depth);
 
