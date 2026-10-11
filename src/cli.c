@@ -183,39 +183,36 @@ static void readRunControl(options_t *into) {
   const char *text;
 
   /* the short name wins, as node's aliases have it */
-  json_t table = !rc.get("table").isNothing() ? rc.get("table")
-                                              : rc.get("migration-table");
-  json_t state = !rc.get("state").isNothing() ? rc.get("state")
-                                              : rc.get("state-table");
+  json_t table = !rc.table.isNothing() ? rc.table : rc["migration-table"];
+  json_t state = !rc.state.isNothing() ? rc.state : rc["state-table"];
 
-  if ((text = rcText(rc.get("env"), rcTexts[0], 64)) != NULL)
+  if ((text = rcText(rc.env, rcTexts[0], 64)) != NULL)
     into->env = text;
-  if ((text = rcText(rc.get("configFile"), rcTexts[1], 64)) != NULL)
+  if ((text = rcText(rc.configFile, rcTexts[1], 64)) != NULL)
     into->config = text;
-  if ((text = rcText(rc.get("migrations-dir"), rcTexts[2], 64)) != NULL)
+  if ((text = rcText(rc["migrations-dir"], rcTexts[2], 64)) != NULL)
     into->dir = text;
   if ((text = rcText(table, rcTexts[3], 64)) != NULL)
     into->table = text;
   if ((text = rcText(state, rcTexts[4], 64)) != NULL)
     into->stateTable = text;
-  if ((text = rcText(rc.get("lock-timeout"), rcTexts[5], 64)) != NULL)
+  if ((text = rcText(rc["lock-timeout"], rcTexts[5], 64)) != NULL)
     into->lockTimeout = strtol(text, NULL, 10);
-  if ((text = rcText(rc.get("lock-interval"), rcTexts[6], 64)) != NULL)
+  if ((text = rcText(rc["lock-interval"], rcTexts[6], 64)) != NULL)
     into->lockInterval = strtol(text, NULL, 10);
-  if ((text = rcText(rc.get("log-level"), rcTexts[7], 64)) != NULL)
+  if ((text = rcText(rc["log-level"], rcTexts[7], 64)) != NULL)
     into->logLevel = text;
 
-  into->verbose = rcTruth(rc.get("verbose"));
-  into->noTransactions = rcTruth(rc.get("non-transactional"));
-  into->sqlFile = rcTruth(rc.get("sql-file"));
-  into->ignoreOnInit = rcTruth(rc.get("ignore-on-init"));
-  into->ignoreCompleted = rcTruth(rc.get("ignore-completed-migrations"));
+  into->verbose = rcTruth(rc.verbose);
+  into->noTransactions = rcTruth(rc["non-transactional"]);
+  into->sqlFile = rcTruth(rc["sql-file"]);
+  into->ignoreOnInit = rcTruth(rc["ignore-on-init"]);
+  into->ignoreCompleted = rcTruth(rc["ignore-completed-migrations"]);
 
-  if (strcmp(rc.get("deprecation").kind(), "object") == 0) {
-    char *written = yyjson_mut_val_write(rc.get("deprecation")._node, 0, NULL);
+  if (strcmp(rc.deprecation.kind(), "object") == 0) {
     char *old = rcDeprecation;
 
-    rcDeprecation = written;
+    rcDeprecation = rc.deprecation.owned();
     free(old);
     into->deprecation = rcDeprecation;
   }
@@ -364,7 +361,7 @@ static bool namesVariable(json_t value) {
 static yyjson_mut_val *fromEnv(yyjson_mut_doc *doc, json_t entry) {
 
   const char *set = getenv(entry.ENV.text());
-  json_t fallback = entry.get("default");
+  json_t fallback = entry["default"];
 
   if (set != NULL && set[0] != '\0')
     return yyjson_mut_strcpy(doc, set);
@@ -385,9 +382,9 @@ static yyjson_mut_val *walked(yyjson_mut_doc *doc, json_t value) {
 
     yyjson_mut_val *object = yyjson_mut_obj(doc);
 
-    for (int i = 0; i < value.count(); ++i)
-      yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, value.keyAt(i)),
-                         walked(doc, value.get(value.keyAt(i))));
+    for (entry in value)
+      yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, entry.keyOf()),
+                         walked(doc, entry));
     return object;
   }
 
@@ -395,8 +392,8 @@ static yyjson_mut_val *walked(yyjson_mut_doc *doc, json_t value) {
 
     yyjson_mut_val *array = yyjson_mut_arr(doc);
 
-    for (int i = 0; i < value.count(); ++i)
-      yyjson_mut_arr_append(array, walked(doc, value.at(i)));
+    for (element in value)
+      yyjson_mut_arr_append(array, walked(doc, element));
     return array;
   }
 
@@ -428,10 +425,10 @@ static json_t resolved(json_t entry) {
     yyjson_mut_obj_add_strcpy(doc, object, "driver", driverOf(said));
     yyjson_mut_obj_add(object, yyjson_mut_str(doc, "url"), url);
 
-    for (int i = 0; i < entry.count(); ++i)
-      if (!(entry.keyAt(i) in {"ENV", "default"}))
-        yyjson_mut_obj_put(object, yyjson_mut_strcpy(doc, entry.keyAt(i)),
-                           walked(doc, entry.get(entry.keyAt(i))));
+    for (value in entry)
+      if (!(value.keyOf() in {"ENV", "default"}))
+        yyjson_mut_obj_put(object, yyjson_mut_strcpy(doc, value.keyOf()),
+                           walked(doc, value));
   } else {
     object = walked(doc, entry);
   }
@@ -477,7 +474,8 @@ static json_t configFileRead(const char *path, char *why, size_t room) {
 
   if (load != NULL) {
 
-    json_t read = meta_toJSON("null");
+    /* nothing, until the loader puts what the file says in its place */
+    json_t read = {0};
 
     if (!load(path, &read, why, room) && why[0] == '\0')
       dbmWrite(why, room, TEXT`${path} could not be read`);
@@ -543,13 +541,15 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
 
     yyjson_mut_doc_free(doc);
 
-    env = chosen[0] != '\0'                         ? chosen
-          : file.get("dev").isNothing() &&
-                  !file.get("development").isNothing() ? "development"
-                                                       : "dev";
+    if (chosen[0] != '\0')
+      env = chosen;
+    else if (file.dev.isNothing() && !file.development.isNothing())
+      env = "development";
+    else
+      env = "dev";
   }
 
-  json_t entry = file.get(env);
+  json_t entry = file[env];
 
   if (entry.isNothing()) {
 
@@ -557,9 +557,9 @@ static json_t configuration(const options_t *options, char *why, size_t room) {
     dbm_text_t known = {0};
     defer known.release();
 
-    for (int i = 0; i < file.count(); ++i)
-      if (strcmp(file.keyAt(i), "defaultEnv") != 0)
-        known.append(TEXT`${known.length > 0 ? ", " : ""}${file.keyAt(i)}`);
+    for (environment in file)
+      if (strcmp(environment.keyOf(), "defaultEnv") != 0)
+        known.append(TEXT`${known.length > 0 ? ", " : ""}${environment.keyOf()}`);
 
     dbmWrite(why, room, TEXT`${path} has no environment called ${env} - there is ${known.text != NULL ? known.text : "none"}`);
     return meta_toJSON("null");
@@ -747,16 +747,12 @@ static int create(const options_t *options) {
 static int database(const options_t *options, json_t config) {
 
   char why[512] = "";
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *bare = yyjson_mut_val_mut_copy(doc, config._node);
-
-  if (yyjson_mut_is_obj(bare))
-    yyjson_mut_obj_remove_key(bare, "database");
-
-  yyjson_mut_doc_set_root(doc, bare);
-
-  json_t without = meta_jsonFromMut(doc);
+  json_t without = {};
   defer without.release();
+
+  for (setting in config)
+    if (strcmp(setting.keyOf(), "database") != 0)
+      without[setting.keyOf()] = setting;
 
   driver_t *driver = dbmOpen(without, why, sizeof why);
 
@@ -892,8 +888,8 @@ static size_t scopesOf(const char **into, size_t room) {
 /** Whether a configuration says anything but which database or schema. */
 static bool connectsOnItsOwn(json_t scope) {
 
-  for (int i = 0; i < scope.count(); ++i)
-    if (!(scope.keyAt(i) in {"database", "schema"}))
+  for (setting in scope)
+    if (!(setting.keyOf() in {"database", "schema"}))
       return true;
 
   return false;
@@ -913,10 +909,10 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
   char *text = NULL;
   const char *dir = options->dir != NULL ? options->dir : "migrations";
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *merged = yyjson_mut_val_mut_copy(doc, config._node);
+  json_t merged = {};
 
-  yyjson_mut_doc_set_root(doc, merged);
+  for (setting in config)
+    merged[setting.keyOf()] = setting;
 
   if (scope[0] != '\0') {
 
@@ -928,15 +924,14 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
   }
 
   if (text == NULL)
-    return meta_jsonFromMut(doc);
+    return merged;
 
   json_t read = meta_toJSON(text);
   free(text);
-  defer read.release();
 
   if (read._refused != NULL || strcmp(read.kind(), "object") != 0) {
     dbmWrite(why, room, TEXT`${path} is not a JSON object${read._refused != NULL ? ": " : ""}${read._refused != NULL ? read._refused : ""}`);
-    yyjson_mut_doc_free(doc);
+    merged.release();
     return meta_toJSON("null");
   }
 
@@ -949,10 +944,9 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
   const char *driver = config.driver;
   bool own = connectsOnItsOwn(scoped);
 
-  for (int i = 0; i < scoped.count(); ++i) {
+  for (value in scoped) {
 
-    const char *key = scoped.keyAt(i);
-    json_t value = scoped.get(key);
+    const char *key = value.keyOf();
 
     /* switching only: PostgreSQL has no databases to switch to, a schema */
     if (!own && strcmp(key, "database") == 0 &&
@@ -963,12 +957,10 @@ static json_t scopedConfiguration(const options_t *options, json_t config,
     if (!own && strcmp(driver, "sqlite3") == 0)
       continue;
 
-    yyjson_mut_obj_remove_key(merged, key);
-    yyjson_mut_obj_add(merged, yyjson_mut_strcpy(doc, key),
-                       yyjson_mut_val_mut_copy(doc, value._node));
+    merged[key] = value;
   }
 
-  return meta_jsonFromMut(doc);
+  return merged;
 }
 
 /** One command in one scope: its connection, its tunnel, its lock. */
@@ -1243,7 +1235,11 @@ int dbmMigrateUp(json_t config, const dbm_options_t *options, char *why,
 
   why[0] = '\0';
 
-  /* a copy, since the tunnel puts another in its place and frees this one */
+  /**
+   * A copy, since the tunnel puts another in its place and frees this one.
+   * Of the whole value, whatever it is - a URL is a string - which yyjson
+   * copies and json_t does not: a document copies a value in under a key.
+   */
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
   yyjson_mut_doc_set_root(doc, yyjson_mut_val_mut_copy(doc, config._node));
 
