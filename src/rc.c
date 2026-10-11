@@ -32,12 +32,15 @@ extern char **environ;
 static char *slurp(const char *path) {
 
   struct stat info;
-  FILE *file;
   char *text = NULL;
   long length;
 
-  if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) ||
-      (file = fopen(path, "rb")) == NULL)
+  if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+    return NULL;
+
+  FILE *file = fopen(path, "rb");
+
+  if (file == NULL)
     return NULL;
 
   if (fseek(file, 0, SEEK_END) == 0 && (length = ftell(file)) >= 0 &&
