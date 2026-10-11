@@ -498,7 +498,7 @@ static int untilDone(dml_t *self, const char *table, yyjson_mut_val *key,
   for (;;) {
 
     statement_t select;
-    json_t rows = {0};
+    json_t rows;
 
     opened(&select);
     select.sql.put("SELECT ");
@@ -1181,7 +1181,7 @@ static int batches(dml_t *self, yyjson_mut_val *entry, long size,
   for (;;) {
 
     statement_t select;
-    json_t rows = {0};
+    json_t rows;
 
     opened(&select);
     select.sql.put("SELECT ");
@@ -1322,9 +1322,7 @@ int dml_t__insertWith(dml_t *self, const char *table, json_t rows,
     return -1;
   }
 
-  int answer = insertRows(self, table, list, options);
-
-  return answer;
+  return insertRows(self, table, list, options);
 }
 
 int dml_t__insert(dml_t *self, const char *table, json_t rows) {
@@ -1345,9 +1343,7 @@ int dml_t__insertColumnsWith(dml_t *self, const char *table, json_t columns,
     return -1;
   }
 
-  int answer = insertRows(self, table, list, options);
-
-  return answer;
+  return insertRows(self, table, list, options);
 }
 
 int dml_t__insertColumns(dml_t *self, const char *table, json_t columns,
@@ -1995,7 +1991,7 @@ static int revertUpdate(dml_t *self, yyjson_mut_val *args) {
   for (long offset = 0;;) {
 
     statement_t select;
-    json_t rows = {0};
+    json_t rows;
 
     opened(&select);
     select.sql.put("SELECT * FROM ");
