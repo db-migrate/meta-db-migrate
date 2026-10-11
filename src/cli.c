@@ -1176,7 +1176,21 @@ static int work(options_t *options, json_t config) {
   char why[600] = "";
   dbm_tunnel_t *tunnel = NULL;
 
-  if (!dbmTunnelOpen(&config, &tunnel, why, sizeof why)) {
+  /*
+   * The jobs of one database: the top level's, with those of the scopes
+   * sharing it, or with work:<scope> those of a scope connecting its own.
+   */
+  if (options->scope != NULL && strcmp(options->scope, "all") == 0) {
+    dbmSay(stderr, TEXT`[ERROR] work runs the jobs of one database, the top level with the scopes sharing it, or work:<scope> for a scope with a database of its own\n`);
+    return 1;
+  }
+
+  json_t scoped = scopedConfiguration(options, config,
+                                      options->scope != NULL ? options->scope : "",
+                                      why, sizeof why);
+  defer scoped.releaseAt();
+
+  if (why[0] != '\0' || !dbmTunnelOpen(&scoped, &tunnel, why, sizeof why)) {
     dbmSay(stderr, TEXT`[ERROR] ${why}\n`);
     return 1;
   }
@@ -1194,7 +1208,7 @@ static int work(options_t *options, json_t config) {
 
   options->work.dryRun = options->dryRun;
 
-  int answer = dbmWork(config, &settings, &options->work, why, sizeof why);
+  int answer = dbmWork(scoped, &settings, &options->work, why, sizeof why);
 
   if (!options->dryRun)
     dbmSay(stdout, TEXT`[INFO] [jobs] ${options->work.done} job(s) done\n`);

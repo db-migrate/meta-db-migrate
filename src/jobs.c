@@ -179,6 +179,7 @@ int dbmJobsChange(dbm_state_t *state, dbm_jobs_mutation_t mutate,
 
 typedef struct {
   const char *name;
+  const char *scope;
   bool blocking;
 } registering_t;
 
@@ -223,6 +224,10 @@ static bool registering(yyjson_mut_doc *doc, yyjson_mut_val *jobs,
   assign(doc, fresh, "ID", yyjson_mut_sint(doc, 0));
   assign(doc, fresh, "n", yyjson_mut_strcpy(doc, n));
 
+  /* the scope it belongs to, as node 1.8.1 keeps it: none for the top level */
+  if (it->scope != NULL && it->scope[0] != '\0')
+    assign(doc, fresh, "sc", yyjson_mut_strcpy(doc, it->scope));
+
   if (job != NULL)
     yyjson_mut_obj_replace(jobs, yyjson_mut_str(doc, it->name), fresh);
   else
@@ -231,10 +236,10 @@ static bool registering(yyjson_mut_doc *doc, yyjson_mut_val *jobs,
   return true;
 }
 
-int dbmJobsRegister(dbm_state_t *state, const char *name, bool blocking,
-                    char *why, size_t room) {
+int dbmJobsRegister(dbm_state_t *state, const char *name, const char *scope,
+                    bool blocking, char *why, size_t room) {
 
-  registering_t it = {name, blocking};
+  registering_t it = {name, scope, blocking};
   char *record = NULL;
 
   if (dbmJobsChange(state, registering, &it, why, room))
@@ -250,6 +255,13 @@ int dbmJobsRegister(dbm_state_t *state, const char *name, bool blocking,
   free(record);
   dbmSay(stdout, TEXT`[INFO] [jobs] ${name} runs in the background\n`);
   return 0;
+}
+
+const char *dbmJobScope(json_t job, const char *fallback) {
+
+  json_t sc = job.get("sc");
+
+  return strcmp(sc.kind(), "string") == 0 ? sc.text() : fallback;
 }
 
 static bool removing(yyjson_mut_doc *doc, yyjson_mut_val *jobs,

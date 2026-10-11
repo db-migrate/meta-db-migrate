@@ -543,9 +543,12 @@ int dbmJobsChange(dbm_state_t *state, dbm_jobs_mutation_t mutate,
 /** The jobs row as JSON, `{"jobs":{}}` when there is none; NULL on failure. */
 char *dbmJobsRead(dbm_state_t *state);
 
-/** A background migration queued, or a failed one again. */
-int dbmJobsRegister(dbm_state_t *state, const char *name, bool blocking,
-                    char *why, size_t room);
+/** A background migration queued, or a failed one again, with its scope. */
+int dbmJobsRegister(dbm_state_t *state, const char *name, const char *scope,
+                    bool blocking, char *why, size_t room);
+
+/** The scope of a job: its sc, or `fallback` for one registered without. */
+const char *dbmJobScope(json_t job, const char *fallback);
 int dbmJobsRemove(dbm_state_t *state, const char *name, char *why,
                   size_t room);
 

@@ -300,6 +300,64 @@ expect "and one not started yet" "{} 2" "$(jobs) $(recorded)"
 run down >/dev/null 2>&1
 expect "then the migrations" "" "$(pets)"
 
+# ------------------------------------------------------ jobs of scopes
+
+# billing/ shares the database: its job is kept with the top level's
+scoped() {
+  # $1 the file in billing/, $2 the body
+  {
+    echo '#include <db_migrate.h>'
+    echo 'static int migrate(dml_t *db) {'
+    echo "$2"
+    echo '  return db->hasFailed() ? -1 : 0;'
+    echo '}'
+    echo 'DBM_MIGRATION_DML_WITH(migrate, {background: true})'
+  } >"$dir/migrations/billing/$1.c"
+}
+
+project scopes
+mkdir -p "$dir/migrations/billing"
+scoped 20261009000010-b1 '  db->updateWith("pets", {kind: "hound"}, {kind: "dog"}, {batch: 1});'
+run up >/dev/null 2>&1
+run up:billing >/dev/null 2>&1
+expect "a job keeps its scope, as node 1.8.1 does" billing \
+  "$(lite "select json_extract(value, '\$.jobs.\"20261009000010-b1\".sc') from migrations_state where key = '__dbmigrate_jobs__'")"
+run work --interval 10 >scopes.out 2>&1
+expect "and runs in it, recorded with it" \
+  "hound cat fish hound hound fish billing/20261009000010-b1" \
+  "$(kinds) $(lite "select name from migrations where name like 'billing/%'")"
+run down:billing >/dev/null 2>&1
+expect "down of the scope reverts it" "dog cat fish dog dog fish 2" "$(kinds) $(recorded)"
+
+run up:billing >/dev/null 2>&1
+run down >down.out 2>&1
+expect "down of the top level leaves the job of the scope alone" \
+  "queued 1 0" \
+  "$(lite "select json_extract(value, '\$.jobs.\"20261009000010-b1\".s') from migrations_state where key = '__dbmigrate_jobs__'") $(recorded) $(grep -c 'is missing' down.out)"
+
+expect "work:all is refused" 1 "$(run work:all 2>&1 | grep -c 'work:<scope> for a scope with a database of its own')"
+
+# a scope with a database of its own keeps its jobs there: work:<scope>
+project own
+mkdir -p "$dir/migrations/billing"
+echo '{"filename": "billing.db"}' >"$dir/migrations/billing/config.json"
+cat >"$dir/migrations/billing/20261009000010-b1.c" <<'C'
+#include <db_migrate.h>
+static int migrate(schema_t *db) {
+  return db->createTable("bills", {id: {type: "int", primaryKey: true}, paid: {type: "int"}});
+}
+DBM_MIGRATION_V2(migrate)
+C
+scoped 20261009000011-b2 '  db->insert("bills", {id: 1, paid: 0});
+  db->updateWith("bills", {paid: 1}, {paid: 0}, {batch: 1});'
+run up:billing >/dev/null 2>&1
+run work --interval 10 >/dev/null 2>&1
+expect "work leaves the jobs of a scope with its own database" 0 \
+  "$(sqlite3 "$dir/billing.db" "select count(*) from bills" 2>&1)"
+run work:billing --interval 10 >/dev/null 2>&1
+expect "work:billing runs them there" "1 billing/20261009000011-b2 {}" \
+  "$(sqlite3 "$dir/billing.db" "select paid from bills; select name from migrations where name like '%b2'; select json_extract(value, '\$.jobs') from migrations_state where key = '__dbmigrate_jobs__'" 2>&1 | tr '\n' ' ' | sed 's/ $//')"
+
 # ------------------------------------------------ background needs dml
 
 dir="$work/notdml"

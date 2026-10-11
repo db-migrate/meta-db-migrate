@@ -72,17 +72,43 @@ static void workerId(char into[32]) {
   into[24] = '\0';
 }
 
-/** The migration a job runs, by its key, in whichever scope it is. */
-static const dbm_migration_t *migrationOf(const char *key) {
+/** Whether a migration's name is in `scope`: what is before its last slash. */
+static bool ofScope(const char *name, const char *scope) {
+
+  const char *slash = strrchr(name, '/');
+  size_t length = slash != NULL ? (size_t)(slash - name) : 0;
+
+  return strlen(scope) == length && strncmp(name, scope, length) == 0;
+}
+
+/**
+ * The migration a job runs, by its key, in the scope the job keeps - one
+ * registered before jobs kept their scope in whichever scope it is.
+ */
+static const dbm_migration_t *migrationOf(const char *key, const char *scope) {
 
   size_t total;
   const dbm_migration_t *migrations = dbmMigrations(&total);
 
   for (size_t i = 0; i < total; ++i)
-    if (strcmp(dbmKeyOf(migrations[i].name), key) == 0)
+    if (strcmp(dbmKeyOf(migrations[i].name), key) == 0 &&
+        (scope == NULL || ofScope(migrations[i].name, scope)))
       return &migrations[i];
 
   return NULL;
+}
+
+/** The migration of a job, in the scope it keeps. */
+static const dbm_migration_t *jobMigration(dbm_state_t *state, const char *key) {
+
+  char *text = dbmJobsRead(state);
+  json_t jobs = meta_toJSON(text != NULL ? text : "{\"jobs\":{}}");
+  const dbm_migration_t *migration =
+      migrationOf(key, dbmJobScope(jobs.get("jobs").get(key), NULL));
+
+  free(text);
+  jobs.release();
+  return migration;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,7 +200,7 @@ static int runJob(slot_t *slot, driver_t *driver, const char *name,
   dbm_job_t job = {.state = state, .id = slot->id, .stopping = &stopRequested,
                    .pause = slot->work->pause, .batch = slot->work->batch,
                    .seen = seen};
-  const dbm_migration_t *migration = migrationOf(name);
+  const dbm_migration_t *migration = jobMigration(state, name);
   char why[600] = "";
 
   dbmWrite(job.name, sizeof job.name, TEXT`${name}`);

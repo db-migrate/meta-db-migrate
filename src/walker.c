@@ -285,7 +285,7 @@ static int registered(driver_t *driver, const dbm_migration_t *migration) {
     return -1;
   }
 
-  if (dbmJobsRegister(driver->state, dbmKeyOf(migration->name),
+  if (dbmJobsRegister(driver->state, dbmKeyOf(migration->name), scope,
                       migration->blocking, why, sizeof why)) {
     dbmSay(stderr, TEXT`[ERROR] ${shown(migration->name)}: ${why}\n`);
     return -1;
@@ -698,12 +698,15 @@ int dbmDown(driver_t *driver, size_t count, const char *destination,
   defer jobs.release();
 
   json_t list = jobs.get("jobs");
-  int jobCount = list.count();
-  const char **keys = calloc((size_t)jobCount + 1, sizeof(char *));
+  int all = list.count();
+  int jobCount = 0;
+  const char **keys = calloc((size_t)all + 1, sizeof(char *));
   defer free(keys);
 
-  for (int i = 0; keys != NULL && i < jobCount; ++i)
-    keys[i] = list.keyAt(i);
+  /* the jobs of this scope: scopes sharing the database share the row */
+  for (int i = 0; keys != NULL && i < all; ++i)
+    if (strcmp(dbmJobScope(list.get(list.keyAt(i)), scope), scope) == 0)
+      keys[jobCount++] = list.keyAt(i);
 
   for (int i = 0; keys != NULL && i < jobCount; ++i)
     for (int j = i + 1; j < jobCount; ++j)
