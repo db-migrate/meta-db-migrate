@@ -177,6 +177,15 @@ static void releaseArgs(ssh_args_t *args) {
     free(args->items[i]);
 }
 
+/** What ssh runs to ask, answering from the environment openSsh sets. */
+static const char askpassScript[] = `
+  #!/bin/sh
+  case "$1" in
+    *assphrase*) printf '%s\\n' "$DBM_SSH_PASSPHRASE" ;;
+    *) printf '%s\\n' "$DBM_SSH_PASSWORD" ;;
+  esac
+  `;
+
 static long openSsh(json_t config, const char *host, long port, void **handle,
                     char *why, size_t room) {
 
@@ -187,9 +196,9 @@ static long openSsh(json_t config, const char *host, long port, void **handle,
   const char *password = config.password;
   const char *passphrase = config.passphrase;
   const char *localHost = config.localHost;
-  long localPort = config.localPort.number();
+  long localPort = config.localPort;
   long sshPort = config.port.isNothing() ? 22 : config.port.number();
-  long keepalive = config.keepaliveInterval.number();
+  long keepalive = config.keepaliveInterval;
   long timeout = config.readyTimeout.isNothing() ? 20000
                                                  : config.readyTimeout.number();
   const char *tmp = getenv("TMPDIR");
@@ -261,16 +270,12 @@ static long openSsh(json_t config, const char *host, long port, void **handle,
   if (keepalive > 0)
     addOption(&args, TEXT`ServerAliveInterval=${(keepalive + 999) / 1000}`);
 
-  json_t options = config.options;
+  for (option in config.options) {
 
-  for (int i = 0; i < options.count(); ++i) {
-
-    json_t value = options.get(options.keyAt(i));
-
-    if (strcmp(value.kind(), "string") == 0)
-      addOption(&args, TEXT`${options.keyAt(i)}=${value.text()}`);
+    if (strcmp(option.kind(), "string") == 0)
+      addOption(&args, TEXT`${option.keyOf()}=${option.text()}`);
     else
-      addOption(&args, TEXT`${options.keyAt(i)}=${value.number()}`);
+      addOption(&args, TEXT`${option.keyOf()}=${option.number()}`);
   }
 
   dbmWrite(forward, sizeof forward, TEXT`${localHost}:${localPort}:${host}:${port}`);
@@ -294,12 +299,7 @@ static long openSsh(json_t config, const char *host, long port, void **handle,
 
   dbmWrite(askpass, sizeof askpass, TEXT`${tunnel->dir}/askpass`);
 
-  if (secret &&
-      !writeFile(askpass,
-                 "#!/bin/sh\ncase \"$1\" in\n"
-                 "  *assphrase*) printf '%s\\n' \"$DBM_SSH_PASSPHRASE\" ;;\n"
-                 "  *) printf '%s\\n' \"$DBM_SSH_PASSWORD\" ;;\nesac\n",
-                 0700)) {
+  if (secret && !writeFile(askpass, askpassScript, 0700)) {
     dbmWrite(why, room, TEXT`cannot write the tunnel's askpass: ${strerror(errno)}`);
     releaseArgs(&args);
     removeAll(tunnel);

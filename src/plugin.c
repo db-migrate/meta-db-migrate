@@ -236,18 +236,17 @@ bool dbmTunnelOpen(json_t *config, dbm_tunnel_t **opened, char *why,
   }
 
   /* the connection, pointed at the tunnel's end; the tunnel is not its business */
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *copy = yyjson_mut_val_mut_copy(doc, connection._node);
+  json_t pointed = {};
 
-  yyjson_mut_obj_remove_key(copy, "tunnel");
-  yyjson_mut_obj_remove_key(copy, "host");
-  yyjson_mut_obj_remove_key(copy, "port");
-  yyjson_mut_obj_add_str(doc, copy, "host", "127.0.0.1");
-  yyjson_mut_obj_add_int(doc, copy, "port", local);
-  yyjson_mut_doc_set_root(doc, copy);
+  for (setting in connection)
+    if (!(setting.keyOf() in {"tunnel", "host", "port"}))
+      pointed[setting.keyOf()] = setting;
+
+  pointed.host = "127.0.0.1";
+  pointed.port = local;
 
   connection.release();
-  *config = meta_jsonFromMut(doc);
+  *config = pointed;
 
   *opened = malloc(sizeof **opened);
   (*opened)->close = entry->close;
