@@ -101,13 +101,11 @@ static const dbm_migration_t *migrationOf(const char *key, const char *scope) {
 static const dbm_migration_t *jobMigration(dbm_state_t *state, const char *key) {
 
   char *text = dbmJobsRead(state);
-  json_t jobs = meta_toJSON(text != NULL ? text : "{\"jobs\":{}}");
-  const dbm_migration_t *migration =
-      migrationOf(key, dbmJobScope(jobs.get("jobs").get(key), NULL));
+  json_t jobs = meta_toJSON(text != NULL ? text : `{"jobs":{}}`);
 
   free(text);
-  jobs.release();
-  return migration;
+
+  return migrationOf(key, dbmJobScope(jobs.jobs[key], NULL));
 }
 
 /* ------------------------------------------------------------------ */
@@ -184,8 +182,8 @@ static bool recorded(driver_t *driver, const char *name) {
   if (driver->loadedMigrations(driver, &names) != 0)
     return false;
 
-  for (int i = 0; i < names.count(); ++i)
-    found = found || strcmp(names.at(i).get("name").text(), name) == 0;
+  for (row in names)
+    found = found || strcmp(row.name.text(), name) == 0;
 
   names.release();
   return found;
@@ -205,7 +203,7 @@ static int runJob(slot_t *slot, driver_t *driver, const char *name,
   dbmWrite(job.name, sizeof job.name, TEXT`${name}`);
 
   if (migration == NULL || !dbmLoaded(migration)) {
-    dbmJobUpdate(&job, "{\"s\":\"failed\",\"ID\":0,\"err\":\"the migration file is missing\"}",
+    dbmJobUpdate(&job, `{"s":"failed","ID":0,"err":"the migration file is missing"}`,
                  why, sizeof why);
     dbmWrite(slot->error, sizeof slot->error, TEXT`The migration file of the job ${name} is missing`);
     return -1;
@@ -242,7 +240,7 @@ static int runJob(slot_t *slot, driver_t *driver, const char *name,
   if (job.lost) {
     dbmSay(stderr, TEXT`[WARN] [jobs] ${name} was taken over by another worker\n`);
   } else if (answer == 1) {
-    dbmJobUpdate(&job, "{\"s\":\"queued\",\"ID\":0}", failed, sizeof failed);
+    dbmJobUpdate(&job, `{"s":"queued","ID":0}`, failed, sizeof failed);
     dbmSay(stdout, TEXT`[INFO] [jobs] ${name} stopped, it continues with the next run\n`);
   } else if (answer == 0) {
 
@@ -257,26 +255,19 @@ static int runJob(slot_t *slot, driver_t *driver, const char *name,
   } else {
 
     /* one rolled back starts over, else it goes on after the irreversible */
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *changes = yyjson_mut_obj(doc);
-
-    yyjson_mut_doc_set_root(doc, changes);
-    yyjson_mut_obj_add_str(doc, changes, "s", "failed");
-    yyjson_mut_obj_add_int(doc, changes, "ID", 0);
-    yyjson_mut_obj_add_strcpy(doc, changes, "err", why[0] != '\0' ? why : "it failed");
+    json_t changes = {s: "failed", ID: 0, err: why[0] != '\0' ? why : "it failed"};
 
     if (rolledBack) {
-      yyjson_mut_obj_add_int(doc, changes, "step", 0);
-      yyjson_mut_obj_add_int(doc, changes, "learned", 0);
-      yyjson_mut_obj_add_int(doc, changes, "done", 0);
-      yyjson_mut_obj_add_int(doc, changes, "rb", 0);
+      changes.step = 0;
+      changes.learned = 0;
+      changes.done = 0;
+      changes.rb = 0;
     }
 
-    char *text = yyjson_mut_write(doc, 0, NULL);
+    char *text = changes.owned();
 
     dbmJobUpdate(&job, text != NULL ? text : "{}", failed, sizeof failed);
     free(text);
-    yyjson_mut_doc_free(doc);
 
     dbmSay(stderr, TEXT`[ERROR] [jobs] ${name} failed: ${why}\n`);
     reported(slot, 'F', name);
@@ -301,22 +292,20 @@ static int runSlot(slot_t *slot) {
     return -1;
   }
 
-  yyjson_mut_doc *seen = yyjson_mut_doc_new(NULL);
+  json_t seen = {};
   int answer = 0;
-
-  yyjson_mut_doc_set_root(seen, yyjson_mut_obj(seen));
 
   while (!stopRequested && answer == 0) {
 
     char name[256];
-    int claimed = dbmJobsClaim(driver->state, slot->id, seen,
+    int claimed = dbmJobsClaim(driver->state, slot->id, seen._doc,
                                slot->work->timeout, name, sizeof name,
                                slot->error, sizeof slot->error);
 
     if (claimed < 0)
       answer = -1;
     else if (claimed == 1)
-      answer = runJob(slot, driver, name, seen);
+      answer = runJob(slot, driver, name, seen._doc);
     else if (claimed == 0 && !slot->work->watch)
       break;
     else
@@ -325,7 +314,6 @@ static int runSlot(slot_t *slot) {
         dbmSleep(10);
   }
 
-  yyjson_mut_doc_free(seen);
   dbmDisconnect(driver, stateDriver);
   return answer;
 }
@@ -345,16 +333,14 @@ static int dryRun(json_t config, const dbm_options_t *options, char *why,
     return -1;
 
   char *text = driver->state != NULL ? dbmJobsRead(driver->state) : NULL;
-  json_t jobs = meta_toJSON(text != NULL ? text : "{\"jobs\":{}}");
-  json_t list = jobs.get("jobs");
+  json_t jobs = meta_toJSON(text != NULL ? text : `{"jobs":{}}`);
 
   free(text);
 
-  for (int i = 0; i < list.count(); ++i)
-    if (strcmp(list.get(list.keyAt(i)).get("s").text(), "failed") != 0)
-      dbmSay(stdout, TEXT`[INFO] [jobs] ${list.keyAt(i)} would run\n`);
+  for (job in jobs.jobs)
+    if (strcmp(job.s.text(), "failed") != 0)
+      dbmSay(stdout, TEXT`[INFO] [jobs] ${job.keyOf()} would run\n`);
 
-  jobs.release();
   dbmDisconnect(driver, stateDriver);
   return 0;
 }
