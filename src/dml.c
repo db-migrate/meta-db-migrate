@@ -1297,8 +1297,9 @@ int dml_t__insertWith(dml_t *self, const char *table, json_t rows,
   if (self->failed)
     return -1;
 
-  json_t list = dbmRowsOf(rows, meta_toJSON("null"), self->error,
-                          sizeof self->error);
+  /* no values: the rows are given whole */
+  json_t none = {0};
+  json_t list = dbmRowsOf(rows, none, self->error, sizeof self->error);
   defer list.release();
 
   if (self->error[0] != '\0') {
@@ -1310,7 +1311,7 @@ int dml_t__insertWith(dml_t *self, const char *table, json_t rows,
 }
 
 int dml_t__insert(dml_t *self, const char *table, json_t rows) {
-  return dml_t__insertWith(self, table, rows, meta_toJSON("{}"));
+  return dml_t__insertWith(self, table, rows, {});
 }
 
 int dml_t__insertColumnsWith(dml_t *self, const char *table, json_t columns,
@@ -1332,8 +1333,7 @@ int dml_t__insertColumnsWith(dml_t *self, const char *table, json_t columns,
 
 int dml_t__insertColumns(dml_t *self, const char *table, json_t columns,
                          json_t values) {
-  return dml_t__insertColumnsWith(self, table, columns, values,
-                                  meta_toJSON("{}"));
+  return dml_t__insertColumnsWith(self, table, columns, values, {});
 }
 
 int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
@@ -1453,7 +1453,7 @@ int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
 }
 
 int dml_t__update(dml_t *self, const char *table, json_t set, json_t where) {
-  return dml_t__updateWith(self, table, set, where, meta_toJSON("{}"));
+  return dml_t__updateWith(self, table, set, where, {});
 }
 
 /** node's concat: the flag followed by a text parameter. */
@@ -1733,7 +1733,7 @@ int dml_t__deleteWith(dml_t *self, const char *table, json_t where,
 }
 
 int dml_t__delete(dml_t *self, const char *table, json_t where) {
-  return dml_t__deleteWith(self, table, where, meta_toJSON("{}"));
+  return dml_t__deleteWith(self, table, where, {});
 }
 
 int dml_t__purgeWith(dml_t *self, const char *table, const char *migration,
@@ -1798,7 +1798,7 @@ int dml_t__purgeWith(dml_t *self, const char *table, const char *migration,
 }
 
 int dml_t__purge(dml_t *self, const char *table, const char *migration) {
-  return dml_t__purgeWith(self, table, migration, meta_toJSON("{}"));
+  return dml_t__purgeWith(self, table, migration, {});
 }
 
 int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
@@ -1855,7 +1855,7 @@ int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
 }
 
 int dml_t__runSql(dml_t *self, const char *sql, json_t options) {
-  return dml_t__runSqlWith(self, sql, meta_toJSON("[]"), options);
+  return dml_t__runSqlWith(self, sql, [], options);
 }
 
 int dml_t__dropBackups(dml_t *self, const char *migration) {
