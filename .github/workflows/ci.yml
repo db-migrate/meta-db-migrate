@@ -2,8 +2,10 @@
 #
 # meta is not open source. The metalanguage repository publishes it, binary
 # and headers, as the image wxone/meta, and this only uses it: copied out to
-# /opt/meta - see .github/actions/meta. META_IMAGE picks another tag than
-# wxone/meta:latest.
+# /opt/meta - see .github/actions/meta. The tag is the meta commit this is
+# built and tested with, not latest, which follows meta's work and can change
+# what a document's release means under a release already tagged here;
+# META_IMAGE picks another.
 #
 # compat moves a project between node db-migrate and this, both ways, against
 # node-db-migrate and its pg driver as published (NODE_DB_MIGRATE_REF,
@@ -31,7 +33,7 @@ jobs:
 
       - uses: ./.github/actions/meta
         with:
-          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+          image: ${{ vars.META_IMAGE || 'wxone/meta:f4e60f8' }}
 
       - name: system packages
         run: |
@@ -84,7 +86,7 @@ jobs:
 
       - uses: ./.github/actions/meta
         with:
-          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+          image: ${{ vars.META_IMAGE || 'wxone/meta:f4e60f8' }}
 
       - name: system packages
         run: |
@@ -141,7 +143,7 @@ jobs:
 
       - uses: ./.github/actions/meta
         with:
-          image: ${{ vars.META_IMAGE || 'wxone/meta:latest' }}
+          image: ${{ vars.META_IMAGE || 'wxone/meta:f4e60f8' }}
 
       - name: system packages
         run: |

@@ -496,13 +496,14 @@ This repository only uses it. meta bakes that path into itself, so it has to
 stay at `/opt/meta`:
 
 ```sh
-docker create --name meta wxone/meta:latest
+docker create --name meta wxone/meta:f4e60f8
 sudo docker cp meta:/opt/meta /opt/meta && docker rm meta
 META_ROOT=/opt/meta ./build.sh
 ```
 
-`.github/workflows/ci.yml` does exactly this (`.github/actions/meta`;
-`META_IMAGE` picks a tag other than `latest`) and runs every suite on Ubuntu
+`.github/workflows/ci.yml` does exactly this (`.github/actions/meta`; the
+image is tagged with the meta commit this is tested with, `META_IMAGE` picks
+another) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
 `plugins.sh`, `static.sh`, `embed.sh`, `recovery.sh`, `adopt.sh`,
