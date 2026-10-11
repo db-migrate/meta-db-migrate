@@ -82,63 +82,65 @@ typedef struct {
 
 static int work(options_t *options, json_t config);
 
+static const char helpText[] = `
+  usage: migrate <command> [name] [options]
+
+  commands:
+    up [name]          run what has not run, up to and including name
+    down [name]        undo the last one, or everything after name
+    sync name          up or down, whichever reaches name
+    reset              undo everything
+    check              list what would run
+    fix                rebuild node's state from the v2 migrations that ran
+                       (--backup-state keeps the old one)
+    create name        a new migration in migrations/
+                       (--sql, --sql-file, --v2-file, --template NAME)
+
+    status             what is pending, the release, the lock, the background
+                       jobs, and what is deprecated or due
+    work               run the background jobs (--parallel N, --pause MS,
+                       --batch N, --interval MS, --job-timeout MS, --watch);
+                       work:<scope> those of a scope with its own database
+    seed [name]        the seeds in seeds/ again: what they inserted removed, run
+    seed down [name]   what the seeds inserted removed (seed reset: all of them)
+
+    command:scope      the same in migrations/scope/ - up:billing, create:billing
+    db:create name     a database, if it is not there yet
+    db:drop name       a database, if it is there
+
+  options:
+    -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
+    --config FILE               database.json somewhere else, or a .yml
+    -m, --migrations-dir DIR    where migrations are (migrations)
+    -c, --count N               at most N migrations
+    -t, --table NAME            the table the history is kept in (migrations)
+    -s, --state-table NAME      node's state and lock table (migrations_state)
+    --lock-timeout MS           a lock untouched this long is taken over (60000)
+    --lock-interval MS          how often a waiting process looks (1000)
+    --dry-run                   print the statements instead of sending them
+    --check                     with up or sync: list what would run
+    -v, --verbose               print every statement as it is sent
+    --non-transactional         no transaction around a migration
+    --sql-file                  create: an up and a down .sql file instead
+    --sql                       create: one .sql file with an up and a down
+                                section, as db-migrate-plugin-sql writes it
+    --v2-file                   create: a v2 migration, undone by what it learns
+    --ignore-on-init            create: an up that is skipped when run with it;
+                                up: record those without running them
+    --log-level LEVELS          what is printed: info|warn|error|sql
+    --ignore-completed-migrations   as if no migration had run yet
+    --seeds-dir DIR             where seeds are (seeds)
+
+    The options can be kept in a .db-migraterc, as JSON or INI, found from
+    here upwards, or in ~/.db-migraterc - node's names, migrations-dir,
+    lock-timeout, and "deprecation" for the releases.
+    --template NAME             create: what the plugin of that name writes
+    -i, --version               print the version
+    -h, --help                  this
+  `;
+
 static int help(void) {
-
-  dbmSay(stdout, TEXT`usage: migrate <command> [name] [options]
-
-commands:
-  up [name]          run what has not run, up to and including name
-  down [name]        undo the last one, or everything after name
-  sync name          up or down, whichever reaches name
-  reset              undo everything
-  check              list what would run
-  fix                rebuild node's state from the v2 migrations that ran
-                     (--backup-state keeps the old one)
-  create name        a new migration in migrations/
-                     (--sql, --sql-file, --v2-file, --template NAME)
-
-  status             what is pending, the release, the lock, the background
-                     jobs, and what is deprecated or due
-  work               run the background jobs (--parallel N, --pause MS,
-                     --batch N, --interval MS, --job-timeout MS, --watch);
-                     work:<scope> those of a scope with its own database
-  seed [name]        the seeds in seeds/ again: what they inserted removed, run
-  seed down [name]   what the seeds inserted removed (seed reset: all of them)
-
-  command:scope      the same in migrations/scope/ - up:billing, create:billing
-  db:create name     a database, if it is not there yet
-  db:drop name       a database, if it is there
-
-options:
-  -e, --env NAME              entry of database.json (NODE_ENV, defaultEnv, dev)
-  --config FILE               database.json somewhere else, or a .yml
-  -m, --migrations-dir DIR    where migrations are (migrations)
-  -c, --count N               at most N migrations
-  -t, --table NAME            the table the history is kept in (migrations)
-  -s, --state-table NAME      node's state and lock table (migrations_state)
-  --lock-timeout MS           a lock untouched this long is taken over (60000)
-  --lock-interval MS          how often a waiting process looks (1000)
-  --dry-run                   print the statements instead of sending them
-  --check                     with up or sync: list what would run
-  -v, --verbose               print every statement as it is sent
-  --non-transactional         no transaction around a migration
-  --sql-file                  create: an up and a down .sql file instead
-  --sql                       create: one .sql file with an up and a down
-                              section, as db-migrate-plugin-sql writes it
-  --v2-file                   create: a v2 migration, undone by what it learns
-  --ignore-on-init            create: an up that is skipped when run with it;
-                              up: record those without running them
-  --log-level LEVELS          what is printed: info|warn|error|sql
-  --ignore-completed-migrations   as if no migration had run yet
-  --seeds-dir DIR             where seeds are (seeds)
-
-  The options can be kept in a .db-migraterc, as JSON or INI, found from
-  here upwards, or in ~/.db-migraterc - node's names, migrations-dir,
-  lock-timeout, and "deprecation" for the releases.
-  --template NAME             create: what the plugin of that name writes
-  -i, --version               print the version
-  -h, --help                  this
-`);
+  dbmSay(stdout, TEXT`${helpText}`);
   return 0;
 }
 
@@ -612,6 +614,50 @@ static int createSqlFiles(const char *dir, const char *stamp,
   return writeSql(path, false) ? 0 : 1;
 }
 
+/** What `create` writes: a v2 migration, an up --ignore-on-init skips, or the plain one. */
+static const char v2Migration[] = `
+  #include <db_migrate.h>
+
+  static int migrate(schema_t *db) {
+    return 0;
+  }
+
+  DBM_MIGRATION_V2(migrate)
+  `;
+
+static const char ignorableMigration[] = `
+  #include <db_migrate.h>
+
+  static int up(migrator_t *db) {
+
+    /* the database this is run on with --ignore-on-init has it already */
+    if (db->ignoreOnInit)
+      return 0;
+
+    return 0;
+  }
+
+  static int down(migrator_t *db) {
+    return 0;
+  }
+
+  DBM_MIGRATION(up, down)
+  `;
+
+static const char plainMigration[] = `
+  #include <db_migrate.h>
+
+  static int up(migrator_t *db) {
+    return 0;
+  }
+
+  static int down(migrator_t *db) {
+    return 0;
+  }
+
+  DBM_MIGRATION(up, down)
+  `;
+
 /** `migrations/20261008120000-add-pets.c`, with an up and a down to fill in. */
 static int create(const options_t *options) {
 
@@ -682,45 +728,11 @@ static int create(const options_t *options) {
   }
 
   if (options->v2File)
-    dbmSay(file, TEXT`#include <db_migrate.h>
-
-static int migrate(schema_t *db) {
-  return 0;
-}
-
-DBM_MIGRATION_V2(migrate)
-`);
+    dbmSay(file, TEXT`${v2Migration}`);
   else if (options->ignoreOnInit)
-    dbmSay(file, TEXT`#include <db_migrate.h>
-
-static int up(migrator_t *db) {
-
-  /* the database this is run on with --ignore-on-init has it already */
-  if (db->ignoreOnInit)
-    return 0;
-
-  return 0;
-}
-
-static int down(migrator_t *db) {
-  return 0;
-}
-
-DBM_MIGRATION(up, down)
-`);
+    dbmSay(file, TEXT`${ignorableMigration}`);
   else
-    dbmSay(file, TEXT`#include <db_migrate.h>
-
-static int up(migrator_t *db) {
-  return 0;
-}
-
-static int down(migrator_t *db) {
-  return 0;
-}
-
-DBM_MIGRATION(up, down)
-`);
+    dbmSay(file, TEXT`${plainMigration}`);
 
   fclose(file);
   dbmSay(stdout, TEXT`[INFO] Created migration at ${path}\n`);
