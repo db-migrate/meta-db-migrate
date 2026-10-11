@@ -172,9 +172,7 @@ static bool run(char *const *argv, const char *log) {
 
   if (child == 0) {
 
-    FILE *into = freopen(log, "w", stdout);
-
-    if (into != NULL)
+    if (freopen(log, "w", stdout) != NULL)
       dup2(fileno(stdout), fileno(stderr));
 
     execvp(argv[0], argv);
@@ -704,10 +702,12 @@ static int embedSql(const char *dir, const char *into) {
     return 1;
   }
 
-  fputs("/* written by meta-migrate embed-sql; do not edit */\n"
-        "#include <db_migrate.h>\n\n"
-        "__attribute__((constructor)) static void dbmEmbeddedSql(void) {\n",
-        out);
+  fputs(`
+    /* written by meta-migrate embed-sql; do not edit */
+    #include <db_migrate.h>
+
+    __attribute__((constructor)) static void dbmEmbeddedSql(void) {
+    `, out);
 
   embedding_t embedding = {out, embedOne(out, dir, "migrations")};
 
@@ -803,11 +803,11 @@ int main(int argc, char **argv) {
 
   /* where they are as .db-migraterc says it, the command line over it */
   json_t rc = dbmRunControl();
-  const char *dir = strcmp(rc.get("migrations-dir").kind(), "string") == 0
-                        ? rc.get("migrations-dir").text()
+  const char *dir = strcmp(rc["migrations-dir"].kind(), "string") == 0
+                        ? rc["migrations-dir"].text()
                         : "migrations";
-  const char *seedsDir = strcmp(rc.get("seeds-dir").kind(), "string") == 0
-                             ? rc.get("seeds-dir").text()
+  const char *seedsDir = strcmp(rc["seeds-dir"].kind(), "string") == 0
+                             ? rc["seeds-dir"].text()
                              : "seeds";
   const char *command = NULL;
   bool asking = false;
