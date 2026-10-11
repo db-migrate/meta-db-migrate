@@ -40,7 +40,7 @@ struct seed_t {
   const char *name;
 
   /** `__dbmigrate_seeds__`: each seed, the tables it inserted into. */
-  yyjson_mut_doc *seeded;
+  json_t seeded;
   bool stored;
 
   bool dry;
@@ -84,10 +84,6 @@ static int byName(const void *a, const void *b) {
 /* the state                                                          */
 /* ------------------------------------------------------------------ */
 
-static yyjson_mut_val *rootOf(yyjson_mut_doc *doc) {
-  return yyjson_mut_doc_get_root(doc);
-}
-
 static int load(seed_t *self) {
 
   char *text = NULL;
@@ -97,16 +93,19 @@ static int load(seed_t *self) {
 
   self->stored = text != NULL;
 
+  /* read in yyjson, so a root that is not an object is put right in the
+     same document rather than a second one made */
   yyjson_doc *read = text != NULL ? yyjson_read(text, strlen(text), 0) : NULL;
+  yyjson_mut_doc *seeded = read != NULL ? yyjson_doc_mut_copy(read, NULL)
+                                        : yyjson_mut_doc_new(NULL);
 
-  self->seeded = read != NULL ? yyjson_doc_mut_copy(read, NULL)
-                              : yyjson_mut_doc_new(NULL);
   yyjson_doc_free(read);
   free(text);
 
-  if (!yyjson_mut_is_obj(rootOf(self->seeded)))
-    yyjson_mut_doc_set_root(self->seeded, yyjson_mut_obj(self->seeded));
+  if (!yyjson_mut_is_obj(yyjson_mut_doc_get_root(seeded)))
+    yyjson_mut_doc_set_root(seeded, yyjson_mut_obj(seeded));
 
+  self->seeded = meta_jsonFromMut(seeded);
   return 0;
 }
 
@@ -116,7 +115,7 @@ static int store(seed_t *self) {
   if (self->dry)
     return 0;
 
-  char *text = yyjson_mut_write(self->seeded, 0, NULL);
+  char *text = self->seeded.owned();
   int answer = text == NULL
                    ? -1
                    : self->stored
@@ -177,13 +176,13 @@ static bool inSchema(seed_t *self, const char *table) {
 /** The table among those this seed inserted into - written down first. */
 static int remembered(seed_t *self, const char *table) {
 
-  yyjson_mut_val *tables = yyjson_mut_obj_get(rootOf(self->seeded), self->name);
+  json_t tables = self->seeded[self->name];
 
-  for (size_t i = 0; i < yyjson_mut_arr_size(tables); ++i)
-    if (strcmp(yyjson_mut_get_str(yyjson_mut_arr_get(tables, i)), table) == 0)
+  for (known in tables)
+    if (strcmp(known.text(), table) == 0)
       return 0;
 
-  yyjson_mut_arr_add_strcpy(self->seeded, tables, table);
+  tables.push(table);
 
   if (store(self))
     return fail(self, TEXT`could not write the state: ${self->state->db->error}`);
@@ -209,21 +208,15 @@ static int insertRows(seed_t *self, const char *table, json_t rows) {
 
   dbmWrite(flag, sizeof flag, TEXT`seed:${self->name}`);
 
-  for (int i = 0; i < rows.count(); ++i) {
+  for (row in rows) {
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *row = yyjson_mut_val_mut_copy(doc, rows.at(i)._node);
+    /* a copy to mark, its flag written last whatever the row said */
+    json_t copy = {row: row};
+    json_t marked = copy.row;
 
-    yyjson_mut_obj_remove_key(row, FLAG);
-    yyjson_mut_obj_add_strcpy(doc, row, FLAG, flag);
-    yyjson_mut_doc_set_root(doc, row);
+    marked[FLAG] = flag;
 
-    json_t marked = meta_jsonFromMut(doc);
-    int answer = self->driver->insert(self->driver, table, marked);
-
-    marked.release();
-
-    if (answer != 0)
+    if (self->driver->insert(self->driver, table, marked) != 0)
       return fail(self, TEXT`${self->driver->error}`);
   }
 
@@ -241,9 +234,7 @@ int seed_t__insert(seed_t *self, const char *table, json_t rows) {
     return -1;
   }
 
-  int answer = insertRows(self, table, list);
-
-  return answer;
+  return insertRows(self, table, list);
 }
 
 int seed_t__insertColumns(seed_t *self, const char *table, json_t columns,
@@ -257,9 +248,7 @@ int seed_t__insertColumns(seed_t *self, const char *table, json_t columns,
     return -1;
   }
 
-  int answer = insertRows(self, table, list);
-
-  return answer;
+  return insertRows(self, table, list);
 }
 
 json_t seed_t__all(seed_t *self, sql_t query) {
@@ -284,17 +273,17 @@ json_t seed_t__all(seed_t *self, sql_t query) {
 /** What a seed inserted, removed - its tables last first - and forgotten. */
 static int removeSeeded(seed_t *self, const char *name) {
 
-  yyjson_mut_val *tables = yyjson_mut_obj_get(rootOf(self->seeded), name);
+  json_t tables = self->seeded[name];
   char flag[300];
 
   dbmWrite(flag, sizeof flag, TEXT`seed:${name}`);
 
-  for (size_t i = yyjson_mut_arr_size(tables); i > 0; --i) {
+  for (int i = tables.count(); i > 0; --i) {
 
-    const char *table = yyjson_mut_get_str(yyjson_mut_arr_get(tables, i - 1));
+    const char *table = tables[i - 1];
 
     /* a table the migrations dropped since has nothing left to remove */
-    if (table == NULL || !inSchema(self, table))
+    if (table[0] == '\0' || !inSchema(self, table))
       continue;
 
     dbm_text_t head = {0};
@@ -317,23 +306,23 @@ static int removeSeeded(seed_t *self, const char *name) {
       return fail(self, TEXT`${self->driver->error}`);
   }
 
-  yyjson_mut_obj_remove_key(rootOf(self->seeded), name);
+  self->seeded.remove(name);
   return 0;
 }
 
 /** The seeded names, the last first. */
 static size_t seededNames(seed_t *self, const char **into, size_t room) {
 
-  yyjson_mut_val *root = rootOf(self->seeded);
-  size_t count = yyjson_mut_obj_size(root);
+  size_t count = (size_t)self->seeded.count();
   size_t at = 0;
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *key;
 
-  yyjson_mut_obj_iter_init(root, &walk);
+  for (seed in self->seeded) {
 
-  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL && at < room)
-    into[count - 1 - at++] = yyjson_mut_get_str(key);
+    if (at >= room)
+      break;
+
+    into[count - 1 - at++] = seed.keyOf();
+  }
 
   return at;
 }
@@ -343,7 +332,7 @@ static int finish(seed_t *self, int answer, char *why, size_t room) {
   if (answer != 0 || self->failed)
     dbmWrite(why, room, TEXT`${self->error[0] != '\0' ? self->error : self->state->db->error}`);
 
-  yyjson_mut_doc_free(self->seeded);
+  self->seeded.release();
   return answer != 0 || self->failed ? -1 : 0;
 }
 
@@ -364,8 +353,7 @@ int dbmSeed(driver_t *driver, dbm_state_t *state, const char *name,
   /* `seed down [name]`, `seed reset`: only removing */
   if (undo) {
 
-    if (name != NULL &&
-        yyjson_mut_obj_get(rootOf(self.seeded), name) == NULL) {
+    if (name != NULL && strcmp(self.seeded[name].kind(), "nothing") == 0) {
       fail(&self, TEXT`There is no seeded seed "${name}"`);
       return finish(&self, -1, why, room);
     }
@@ -400,7 +388,7 @@ int dbmSeed(driver_t *driver, dbm_state_t *state, const char *name,
 
   /* what they inserted before goes first: all of them, or just this one */
   if (name != NULL) {
-    if (yyjson_mut_obj_get(rootOf(self.seeded), name) != NULL)
+    if (strcmp(self.seeded[name].kind(), "nothing") != 0)
       removeSeeded(&self, name);
   } else {
 
@@ -423,12 +411,10 @@ int dbmSeed(driver_t *driver, dbm_state_t *state, const char *name,
 
     dbmSay(stdout, TEXT`[INFO] [seed] ${entry->name}\n`);
 
-    /* its tables start over, and it moves to the end */
+    /* its tables start over, and it moves to the end - which is what
+       writing a key does */
     self.name = entry->name;
-    yyjson_mut_obj_remove_key(rootOf(self.seeded), entry->name);
-    yyjson_mut_obj_add(rootOf(self.seeded),
-                       yyjson_mut_strcpy(self.seeded, entry->name),
-                       yyjson_mut_arr(self.seeded));
+    self.seeded[entry->name] = [];
 
     int answer = entry->seed(&self);
 
