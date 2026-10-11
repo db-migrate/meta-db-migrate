@@ -844,18 +844,16 @@ static void backupName(dml_t *self, int op, char into[32]) {
  * The migrations with backups - `{m: {age, releases, drop, backups}}` - those
  * due only, unless `all`. Their age counts the releases since the one they
  * were made in; the options are the project's `deprecation`, else node's
- * defaults, 4 releases and dropping by hand.
+ * defaults, 4 releases and dropping by hand. The caller's, which `@owns` says
+ * so that meta releases it where the caller stops using it.
  */
-static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
+@owns static json_t backupsOf(dml_t *self, bool all) {
 
   dbm_state_t *state = self->state;
-  yyjson_mut_doc *groups = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(groups);
+  json_t groups = {};
   char *row = NULL;
   long releases;
   char drop[8];
-
-  yyjson_mut_doc_set_root(groups, root);
 
   if (dbmKvGet(state->db, state->table, BACKUPS, &row) || row == NULL)
     return groups;
@@ -874,36 +872,29 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
 
   for (entry in registry) {
 
-    const char *backup = entry.keyOf();
     const char *migration = entry.m;
-    yyjson_mut_val *group = yyjson_mut_obj_get(root, migration);
 
-    if (group == NULL) {
-
+    /* `&`: the group goes in as it is made, rather than copied in */
+    if (groups[migration].isNothing()) {
       json_t release = entry.r;
+      long age = dbmReleaseAge(state, state->releaseCurrent,
+                               isText(release) ? release.text() : NULL);
 
-      group = yyjson_mut_obj(groups);
-      yyjson_mut_obj_add_int(groups, group, "age",
-                             dbmReleaseAge(state, state->releaseCurrent,
-                                           isText(release) ? release.text()
-                                                           : NULL));
-      yyjson_mut_obj_add_int(groups, group, "releases", releases);
-      yyjson_mut_obj_add_strcpy(groups, group, "drop", drop);
-      yyjson_mut_obj_add_val(groups, group, "backups", yyjson_mut_arr(groups));
-      yyjson_mut_obj_add(root, yyjson_mut_strcpy(groups, migration), group);
+      groups[migration] = &{age: age, releases: releases, drop: drop,
+                            backups: []};
     }
 
-    yyjson_mut_arr_add_strcpy(groups, yyjson_mut_obj_get(group, "backups"),
-                              backup);
+    groups[migration].backups.push(entry.keyOf());
   }
 
   if (all)
     return groups;
 
+  /* taken out while it is walked, which for-in can not do */
   yyjson_mut_obj_iter walk;
   yyjson_mut_val *key;
 
-  yyjson_mut_obj_iter_init(root, &walk);
+  yyjson_mut_obj_iter_init(groups._node, &walk);
 
   while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
     yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
@@ -1881,24 +1872,20 @@ int dml_t__dropBackups(dml_t *self, const char *migration) {
   if (recorded(self, entry) == NULL)
     return finished(self, -1);
 
-  yyjson_mut_doc *groups = backupsOf(self, migration != NULL);
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *key;
+  json_t groups = backupsOf(self, migration != NULL);
   int answer = 0;
 
-  yyjson_mut_obj_iter_init(rootOf(groups), &walk);
+  for (group in groups) {
 
-  while (answer == 0 && (key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    const char *m = yyjson_mut_get_str(key);
+    const char *m = group.keyOf();
 
     if (migration == NULL || strcmp(m, migration) == 0)
-      answer = dropGroup(self, m,
-                         yyjson_mut_obj_get(yyjson_mut_obj_iter_get_val(key),
-                                            "backups"));
+      answer = dropGroup(self, m, group.backups._node);
+
+    if (answer != 0)
+      break;
   }
 
-  yyjson_mut_doc_free(groups);
   return finished(self, answer);
 }
 
@@ -2764,19 +2751,11 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
   /* the backups of the migrations final now */
   if (!self.failed) {
 
-    yyjson_mut_doc *groups = backupsOf(&self, false);
-    yyjson_mut_val *key;
+    json_t groups = backupsOf(&self, false);
 
-    yyjson_mut_obj_iter_init(rootOf(groups), &walk);
-
-    while (!self.failed && (key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-      yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
-      if (strcmp(textOf(yyjson_mut_obj_get(group, "drop")), "auto") == 0)
-        dropGroup(&self, yyjson_mut_get_str(key),
-                  yyjson_mut_obj_get(group, "backups"));
-    }
-
-    yyjson_mut_doc_free(groups);
+    for (group in groups)
+      if (!self.failed && strcmp(group.drop.text(), "auto") == 0)
+        dropGroup(&self, group.keyOf(), group.backups._node);
   }
 
   yyjson_mut_doc_free(self.record);
@@ -2822,17 +2801,12 @@ void dbmDmlWarn(driver_t *driver, dbm_state_t *state) {
 
   yyjson_mut_doc_free(due);
 
-  yyjson_mut_doc *groups = backupsOf(&self, false);
+  json_t groups = backupsOf(&self, false);
 
-  yyjson_mut_obj_iter_init(rootOf(groups), &walk);
+  for (group in groups)
+    if (strcmp(group.drop.text(), "manual") == 0)
+      dbmSay(stderr, TEXT`[WARN] [release] the backups of ${group.keyOf()} are due for dropping, it ran ${group.age.number()} releases ago. Drop them in a dml migration with db.dropBackups("${group.keyOf()}"), it can not be reverted afterwards.\n`);
 
-  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-    yyjson_mut_val *group = yyjson_mut_obj_iter_get_val(key);
-    if (strcmp(textOf(yyjson_mut_obj_get(group, "drop")), "manual") == 0)
-      dbmSay(stderr, TEXT`[WARN] [release] the backups of ${yyjson_mut_get_str(key)} are due for dropping, it ran ${numberOf(group, "age")} releases ago. Drop them in a dml migration with db.dropBackups("${yyjson_mut_get_str(key)}"), it can not be reverted afterwards.\n`);
-  }
-
-  yyjson_mut_doc_free(groups);
   yyjson_mut_doc_free(self.record);
 
   if (self.failed)
