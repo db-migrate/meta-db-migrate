@@ -48,20 +48,12 @@ static void toLog(int level, const char *line) {
 int moduleStart(const char *file) {
 
   char why[512];
-  json_t config = meta_toJSON("{\"driver\": \"sqlite3\"}");
+  json_t config = {driver: "sqlite3", filename: file};
   defer config.releaseAt();
-
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_val_mut_copy(doc, config.node);
-  yyjson_mut_obj_add_str(doc, root, "filename", file);
-  yyjson_mut_doc_set_root(doc, root);
-
-  json_t withFile = meta_jsonFromMut(doc);
-  defer withFile.releaseAt();
 
   dbmSetLogger(toLog);
 
-  if (dbmMigrateUp(withFile, NULL, why, sizeof why) != 0) {
+  if (dbmMigrateUp(config, NULL, why, sizeof why) != 0) {
     fprintf(stderr, "module failed: %s\n", why);
     return 1;
   }
