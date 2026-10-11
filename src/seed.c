@@ -241,7 +241,9 @@ int seed_t__insert(seed_t *self, const char *table, json_t rows) {
     return -1;
   }
 
-  return insertRows(self, table, list);
+  int answer = insertRows(self, table, list);
+
+  return answer;
 }
 
 int seed_t__insertColumns(seed_t *self, const char *table, json_t columns,
@@ -255,17 +257,17 @@ int seed_t__insertColumns(seed_t *self, const char *table, json_t columns,
     return -1;
   }
 
-  return insertRows(self, table, list);
+  int answer = insertRows(self, table, list);
+
+  return answer;
 }
 
 json_t seed_t__all(seed_t *self, sql_t query) {
 
-  json_t rows = meta_toJSON("[]");
+  json_t rows = {0};
 
   if (self->failed)
-    return rows;
-
-  rows.release();
+    return meta_toJSON("[]");
 
   if (dbmQuery(self->driver, &query, &rows) != 0) {
     fail(self, TEXT`${self->driver->error}`);

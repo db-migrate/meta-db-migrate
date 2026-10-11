@@ -209,8 +209,10 @@ static bool takeLock(driver_t *driver, json_t *names) {
   if (!ok)
     return false;
 
-  names->release();
+  json_t before = *names;
+
   *names = again;
+  before.release();
   return true;
 }
 
