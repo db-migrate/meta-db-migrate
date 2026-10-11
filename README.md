@@ -155,9 +155,9 @@ DBM_MIGRATION_DML(migrate)
 - `{irreversible: true}` runs a step without being able to revert it.
 - ``db->all(SQL`...`)`` reads, and is no step.
 
-Where node's soft delete takes the mark `#1` for part of `#10`, this finds
-only `#1`; on MySQL, whose flag column keeps 255 characters, a soft delete
-that would make a flag longer is refused instead of cut off.
+A soft delete's mark `#1` is found as itself, not as part of `#10`; on
+MySQL, whose flag column keeps 255 characters, a soft delete that would make
+a flag longer is refused instead of cut off - as node does since 1.8.1.
 
 ### Background migrations
 
@@ -178,9 +178,12 @@ migrations always go first, and `down` reverts the jobs before the
 migrations. A program runs them with `dbmWork` and stops them with
 `dbmWorkStop`.
 
-Unlike node's worker, a job of a scope runs in its scope, a job recovered by
-rolling back keeps its record, a job whose migration was recorded already is
-forgotten instead of run twice, and `work --dry-run` says what would run.
+A job keeps its scope and runs in it. `migrate work` runs the jobs kept with
+the top level, those of the scopes sharing its database too; a scope with a
+database of its own keeps its jobs there, and `migrate work:<scope>` runs
+them. A job recovered by rolling back keeps its record, a job whose
+migration was recorded already is forgotten instead of run twice, and
+`work --dry-run` says what would run - as node does since 1.8.1.
 
 ### Releases
 

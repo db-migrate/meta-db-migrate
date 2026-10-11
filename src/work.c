@@ -10,14 +10,13 @@
  * two never share anything but the database. All slots of one worker share
  * its id: a job one of them runs is not taken over by another.
  *
- * Where node has a bug, this does what node meant:
+ * As node does since 1.8.1:
  *
- * - a job recovered by rolling back keeps its record, which node's worker
- *   deletes and never writes again
+ * - a job recovered by rolling back keeps its record
  * - a job whose migration is recorded already - its worker died between
  *   recording it and forgetting the job - is forgotten, not run again
- * - a job of a scope runs in its scope; node's worker knows the top level only
- * - --dry-run says which jobs would run, where node's fails on its own writes
+ * - a job of a scope runs in its scope, the one it keeps as sc
+ * - --dry-run says which jobs would run
  */
 #include <db_migrate_driver.h>
 

@@ -100,7 +100,8 @@ commands:
   status             what is pending, the release, the lock, the background
                      jobs, and what is deprecated or due
   work               run the background jobs (--parallel N, --pause MS,
-                     --batch N, --interval MS, --job-timeout MS, --watch)
+                     --batch N, --interval MS, --job-timeout MS, --watch);
+                     work:<scope> those of a scope with its own database
   seed [name]        the seeds in seeds/ again: what they inserted removed, run
   seed down [name]   what the seeds inserted removed (seed reset: all of them)
 

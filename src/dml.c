@@ -20,8 +20,7 @@
  * deletes to purge with a later release in `__dbmigrate_purges__`, both
  * written by compare and swap through the state's own connection.
  *
- * Where node has a bug the data would feel, this does what node meant, and
- * the records stay node's:
+ * As node does since 1.8.1:
  *
  * - the mark of a soft delete `|del:m#1` is found as itself, not inside
  *   `|del:m#10` as well, when reverting it and forgetting its purge
