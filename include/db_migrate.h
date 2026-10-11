@@ -707,7 +707,8 @@ void dbmIgnoreCompleted(bool ignore);
 
 /**
  * node's rc files merged - /etc, ~, the first .db-migraterc from here
- * upwards, $config, db-migrate_* variables - as one object. Never released.
+ * upwards, $config, db-migrate_* variables - as one object, the caller's to
+ * release.
  */
 json_t dbmRunControl(void);
 int dbmCheck(driver_t *driver);

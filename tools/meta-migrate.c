@@ -803,6 +803,8 @@ int main(int argc, char **argv) {
 
   /* where they are as .db-migraterc says it, the command line over it */
   json_t rc = dbmRunControl();
+  defer rc.release();
+
   const char *dir = strcmp(rc["migrations-dir"].kind(), "string") == 0
                         ? rc["migrations-dir"].text()
                         : "migrations";
