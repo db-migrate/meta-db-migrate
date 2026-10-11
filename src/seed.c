@@ -225,8 +225,11 @@ static int insertRows(seed_t *self, const char *table, json_t rows) {
 
 int seed_t__insert(seed_t *self, const char *table, json_t rows) {
 
-  json_t list = dbmRowsOf(rows, meta_toJSON("null"), self->error,
-                          sizeof self->error);
+  /* no values: the rows are the objects themselves */
+  json_t none = meta_toJSON("null");
+  defer none.release();
+
+  json_t list = dbmRowsOf(rows, none, self->error, sizeof self->error);
   defer list.release();
 
   if (self->error[0] != '\0' && !self->failed) {
