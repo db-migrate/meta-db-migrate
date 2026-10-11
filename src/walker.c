@@ -1149,7 +1149,7 @@ int dbmStatus(driver_t *driver) {
           json_t entry = registry.get(mark);
           json_t r = entry.get("r");
           char o[200];
-          char *options = yyjson_mut_val_write(entry.get("o").node, 0, NULL);
+          char *options = yyjson_mut_val_write(entry.get("o")._node, 0, NULL);
           yyjson_mut_doc *given = yyjson_mut_doc_new(NULL);
           yyjson_doc *parsed = options != NULL ? yyjson_read(options, strlen(options), 0) : NULL;
 

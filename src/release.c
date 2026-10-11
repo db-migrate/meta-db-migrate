@@ -39,7 +39,7 @@ static void shownValue(json_t value, char *into, size_t room) {
     return;
   }
 
-  char *text = value.node != NULL ? yyjson_mut_val_write(value.node, 0, NULL)
+  char *text = value._node != NULL ? yyjson_mut_val_write(value._node, 0, NULL)
                                   : NULL;
 
   dbmWrite(into, room, TEXT`${text != NULL ? text : "undefined"}`);
@@ -53,7 +53,7 @@ int dbmReleaseOptions(json_t options, yyjson_mut_doc *doc, yyjson_mut_val *into,
   json_t drop = options.get("drop");
   char said[128];
 
-  if (releases.node != NULL) {
+  if (releases._node != NULL) {
 
     const char *kind = releases.kind();
     double n = strcmp(kind, "number") == 0   ? releases.real()
@@ -72,7 +72,7 @@ int dbmReleaseOptions(json_t options, yyjson_mut_doc *doc, yyjson_mut_val *into,
       yyjson_mut_obj_add_int(doc, into, "releases", (long)n);
   }
 
-  if (drop.node != NULL) {
+  if (drop._node != NULL) {
 
     if (strcmp(drop.kind(), "string") != 0 ||
         !(drop.text() in {"auto", "manual"})) {

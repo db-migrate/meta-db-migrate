@@ -111,25 +111,25 @@ static const char *textOf(yyjson_mut_val *value) {
 }
 
 static bool isText(json_t value) {
-  return value.node != NULL && strcmp(value.kind(), "string") == 0;
+  return value._node != NULL && strcmp(value.kind(), "string") == 0;
 }
 
 static bool isObject(json_t value) {
-  return value.node != NULL && strcmp(value.kind(), "object") == 0;
+  return value._node != NULL && strcmp(value.kind(), "object") == 0;
 }
 
 static bool isArray(json_t value) {
-  return value.node != NULL && strcmp(value.kind(), "array") == 0;
+  return value._node != NULL && strcmp(value.kind(), "array") == 0;
 }
 
 static bool isTrue(json_t options, const char *key) {
   json_t value = options.get(key);
-  return value.node != NULL && strcmp(value.kind(), "bool") == 0 &&
+  return value._node != NULL && strcmp(value.kind(), "bool") == 0 &&
          value.truth();
 }
 
 static yyjson_mut_val *copyIn(yyjson_mut_doc *doc, json_t value) {
-  return value.node != NULL ? yyjson_mut_val_mut_copy(doc, value.node)
+  return value._node != NULL ? yyjson_mut_val_mut_copy(doc, value._node)
                             : yyjson_mut_null(doc);
 }
 
@@ -472,7 +472,7 @@ static long batchOf(dml_t *self, json_t options) {
 
   json_t batch = options.get("batch");
 
-  if (batch.node != NULL && strcmp(batch.kind(), "number") == 0 &&
+  if (batch._node != NULL && strcmp(batch.kind(), "number") == 0 &&
       batch.number() > 0)
     return (long)batch.number();
 
@@ -1100,7 +1100,7 @@ static yyjson_mut_val *entryOf(dml_t *self, int t, const char *action,
 /** A value as JSON.stringify writes it, for the log. */
 static void said(json_t value, char *into, size_t room) {
 
-  char *text = value.node != NULL ? yyjson_mut_val_write(value.node, 0, NULL) : NULL;
+  char *text = value._node != NULL ? yyjson_mut_val_write(value._node, 0, NULL) : NULL;
 
   dbmWrite(into, room, TEXT`${text != NULL ? text : "undefined"}`);
   free(text);
@@ -1289,7 +1289,7 @@ static int insertRows(dml_t *self, const char *table, json_t rows,
   for (int i = 0; answer == 0 && i < rows.count(); ++i) {
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *row = yyjson_mut_val_mut_copy(doc, rows.at(i).node);
+    yyjson_mut_val *row = yyjson_mut_val_mut_copy(doc, rows.at(i)._node);
 
     if (!irreversible) {
       yyjson_mut_obj_remove_key(row, FLAG);
@@ -1388,7 +1388,7 @@ int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
 
   for (size_t i = 0; key != NULL && i < yyjson_mut_arr_size(key); ++i) {
     const char *k = textOf(yyjson_mut_arr_get(key, i));
-    if (set.get(k).node != NULL)
+    if (set.get(k)._node != NULL)
       changed.append(TEXT`${changed.length > 0 ? ", " : ""}${k}`);
   }
 
@@ -1536,7 +1536,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
 
   json_t column = options.get("column");
   json_t purge = options.get("purge");
-  bool time = options.get("value").node == NULL;
+  bool time = options.get("value")._node == NULL;
 
   if (!isText(column))
     return fail(self, TEXT`delete("${table}") in soft mode needs the column marking the rows as deleted, { mode: 'soft', column: 'deleted_at' }`);
@@ -1560,7 +1560,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
     return -1;
   }
 
-  if (purge.node != NULL && !isTrue(options, "purge") && !isObject(purge)) {
+  if (purge._node != NULL && !isTrue(options, "purge") && !isObject(purge)) {
     closed(&condition);
     return fail(self, TEXT`delete("${table}") takes purge: true or { releases, drop }, to purge the rows with a later release`);
   }
@@ -1662,7 +1662,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
     answer = sent(self, &change, NULL, false);
   } else if (answer == 0) {
 
-    if (purge.node != NULL) {
+    if (purge._node != NULL) {
       purge_change_t scheduled = {self, mark, table, key, purge};
       answer = changeState(self, PURGES, schedulingPurge, &scheduled);
     }

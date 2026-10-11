@@ -518,7 +518,7 @@ int dbmBaseValueLiteral(driver_t *self, dbm_text_t *out, json_t value) {
   if (strcmp(kind, "number") == 0) {
 
     /* the shortest form that reads back as the same number, which TEXT writes */
-    if (yyjson_mut_is_real(value.node))
+    if (yyjson_mut_is_real(value._node))
       out->append(TEXT`${value.real()}`);
     else
       out->append(TEXT`${value.number()}`);
@@ -527,7 +527,7 @@ int dbmBaseValueLiteral(driver_t *self, dbm_text_t *out, json_t value) {
   }
 
   /* a document as a value is its text, which is what a json column takes */
-  char *text = yyjson_mut_val_write(value.node, 0, NULL);
+  char *text = yyjson_mut_val_write(value._node, 0, NULL);
 
   if (text == NULL)
     return dbmFail(self, TEXT`a value that could not be written as JSON`);
@@ -1090,12 +1090,12 @@ static sql_value_t parameterOf(json_t value, texts_t *texts) {
     return sqlTruth(value.truth());
 
   if (strcmp(kind, "number") == 0)
-    return yyjson_mut_is_real(value.node) ? sqlReal(value.real())
+    return yyjson_mut_is_real(value._node) ? sqlReal(value.real())
                                       : sqlNumber(value.number());
 
   if (strcmp(kind, "object") == 0 || strcmp(kind, "array") == 0) {
 
-    char *text = yyjson_mut_val_write(value.node, 0, NULL);
+    char *text = yyjson_mut_val_write(value._node, 0, NULL);
 
     texts->push(text);
     return sqlText(text);
@@ -1190,7 +1190,7 @@ int dbmQueryParams(driver_t *self, const char *text, json_t params,
     chunks.push(mark + 1);
   }
 
-  int given = params.node != NULL && strcmp(params.kind(), "array") == 0
+  int given = params._node != NULL && strcmp(params.kind(), "array") == 0
                   ? params.count()
                   : 0;
 
@@ -1403,13 +1403,13 @@ static bool rowFrom(yyjson_mut_doc *doc, yyjson_mut_val *into, json_t columns,
 
     json_t value = values.at(from + i);
 
-    if (value.node == NULL) {
+    if (value._node == NULL) {
       dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
       return false;
     }
 
     yyjson_mut_obj_add(row, yyjson_mut_strcpy(doc, columns.at(i).text()),
-                       yyjson_mut_val_mut_copy(doc, value.node));
+                       yyjson_mut_val_mut_copy(doc, value._node));
   }
 
   yyjson_mut_arr_append(into, row);
@@ -1463,14 +1463,14 @@ json_t dbmRowsOf(json_t rows, json_t values, char *why, size_t room) {
     for (int at = 0; ok && at < data.count(); at += width)
       ok = rowFrom(doc, list, columns, data, at, why, room);
   } else if (strcmp(rows.kind(), "object") == 0) {
-    yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows.node));
+    yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows._node));
   } else if (strcmp(rows.kind(), "array") == 0) {
     for (int i = 0; ok && i < rows.count(); ++i) {
       if (strcmp(rows.at(i).kind(), "object") != 0) {
         dbmWrite(why, room, TEXT`insert needs the rows to insert`);
         ok = false;
       } else {
-        yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows.at(i).node));
+        yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows.at(i)._node));
       }
     }
   } else {

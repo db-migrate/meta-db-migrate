@@ -272,7 +272,7 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row);
 
 /**
  * A statement written with `?` for its parameters - node's runSql(sql,
- * params) - and the parameters as a JSON array, or nothing with `.node`
+ * params) - and the parameters as a JSON array, or nothing with `._node`
  * NULL. A `read` runs in a dry run as well: what is read decides what would
  * be written.
  */
