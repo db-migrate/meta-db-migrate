@@ -39,21 +39,24 @@ static void shownValue(json_t value, char *into, size_t room) {
     return;
   }
 
-  char *text = value._node != NULL ? yyjson_mut_val_write(value._node, 0, NULL)
-                                  : NULL;
+  char *text = strcmp(value.kind(), "nothing") != 0 ? value.owned() : NULL;
 
   dbmWrite(into, room, TEXT`${text != NULL ? text : "undefined"}`);
   free(text);
 }
 
+/**
+ * `into` is written in yyjson, which is what the header hands over: a json_t
+ * is made only by taking a document over, and this one is the caller's.
+ */
 int dbmReleaseOptions(json_t options, yyjson_mut_doc *doc, yyjson_mut_val *into,
                       char *why, size_t room) {
 
-  json_t releases = options.get("releases");
-  json_t drop = options.get("drop");
+  json_t releases = options.releases;
+  json_t drop = options.drop;
   char said[128];
 
-  if (releases._node != NULL) {
+  if (strcmp(releases.kind(), "nothing") != 0) {
 
     const char *kind = releases.kind();
     double n = strcmp(kind, "number") == 0   ? releases.real()
@@ -72,7 +75,7 @@ int dbmReleaseOptions(json_t options, yyjson_mut_doc *doc, yyjson_mut_val *into,
       yyjson_mut_obj_add_int(doc, into, "releases", (long)n);
   }
 
-  if (drop._node != NULL) {
+  if (strcmp(drop.kind(), "nothing") != 0) {
 
     if (strcmp(drop.kind(), "string") != 0 ||
         !(drop.text() in {"auto", "manual"})) {
@@ -100,19 +103,16 @@ int dbmReleaseSettings(dbm_state_t *state, yyjson_mut_val *given,
     json_t project = meta_toJSON(state->deprecation);
     int answer = dbmReleaseOptions(project, NULL, NULL, why, room);
 
-    if (answer == 0) {
-      if (strcmp(project.get("releases").kind(), "number") == 0)
-        *releases = (long)project.get("releases").real();
-      else if (strcmp(project.get("releases").kind(), "string") == 0)
-        *releases = atol(project.get("releases").text());
-      if (strcmp(project.get("drop").kind(), "string") == 0)
-        dbmWrite(drop, 8, TEXT`${project.get("drop").text()}`);
-    }
-
-    project.release();
-
     if (answer != 0)
       return -1;
+
+    if (strcmp(project.releases.kind(), "number") == 0)
+      *releases = (long)project.releases.real();
+    else if (strcmp(project.releases.kind(), "string") == 0)
+      *releases = atol(project.releases.text());
+
+    if (strcmp(project.drop.kind(), "string") == 0)
+      dbmWrite(drop, 8, TEXT`${project.drop.text()}`);
   }
 
   /* and the entry's own */
@@ -134,10 +134,9 @@ long dbmReleaseAge(dbm_state_t *state, long index, const char *release) {
     return index;
 
   json_t known = meta_toJSON(state->releaseIndex);
-  json_t at = known.get(release);
+  json_t at = known[release];
   long made = strcmp(at.kind(), "number") == 0 ? at.number() : 0;
 
-  known.release();
   return index - made;
 }
 
@@ -206,6 +205,10 @@ static int listed(dbm_state_t *state, long index, const char *t, const char *c,
   return 1;
 }
 
+/**
+ * Read in yyjson, because the schema is the state's yyjson document and a
+ * json_t is made only by taking one over.
+ */
 long dbmDeprecations(dbm_state_t *state, long index, dbm_deprecated_t *into,
                      size_t room, char *why, size_t whyRoom) {
 
@@ -382,17 +385,13 @@ int dbmReleaseRevertible(dbm_state_t *state, const char *label, char *why,
     return 0;
 
   json_t record = meta_toJSON(row);
-  json_t steps = record.get("s");
   dbm_text_t purged = {0};
 
   free(row);
 
-  for (int i = 0; i < steps.count(); ++i)
-    if (strcmp(steps.at(i).get("t").kind(), "number") == 0 &&
-        steps.at(i).get("t").number() == 3)
-      purged.append(TEXT`${purged.length > 0 ? ", " : ""}purged "${steps.at(i).get("c").at(0).text()}"`);
-
-  record.release();
+  for (step in record.s)
+    if (strcmp(step.t.kind(), "number") == 0 && step.t.number() == 3)
+      purged.append(TEXT`${purged.length > 0 ? ", " : ""}purged "${step.c[0].text()}"`);
 
   int answer = 0;
 
