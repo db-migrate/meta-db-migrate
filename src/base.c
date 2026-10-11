@@ -517,7 +517,11 @@ int dbmBaseValueLiteral(driver_t *self, dbm_text_t *out, json_t value) {
 
   if (strcmp(kind, "number") == 0) {
 
-    /* the shortest form that reads back as the same number, which TEXT writes */
+    /**
+     * The shortest form that reads back as the same number, which TEXT
+     * writes. Whether it is a whole number is yyjson's to say: `kind()`
+     * answers "number" for both.
+     */
     if (yyjson_mut_is_real(value._node))
       out->append(TEXT`${value.real()}`);
     else
@@ -526,8 +530,11 @@ int dbmBaseValueLiteral(driver_t *self, dbm_text_t *out, json_t value) {
     return 0;
   }
 
-  /* a document as a value is its text, which is what a json column takes */
-  char *text = yyjson_mut_val_write(value._node, 0, NULL);
+  /**
+   * A document as a value is its text, which is what a json column takes.
+   * Nothing is not a document, and `owned()` has no text to write for it.
+   */
+  char *text = value.isNothing() ? NULL : value.owned();
 
   if (text == NULL)
     return dbmFail(self, TEXT`a value that could not be written as JSON`);
@@ -543,7 +550,7 @@ const char *dbmColumnType(json_t spec) {
   if (strcmp(spec.kind(), "string") == 0)
     return spec.text();
 
-  return spec.type.text();
+  return spec.type;
 }
 
 /**
@@ -741,12 +748,9 @@ int dbmBaseAddForeignKey(driver_t *self, const char *table,
   if (self->inlineForeignKeys)
     return dbmFail(self, TEXT`${self->name} cannot add foreign key ${name} to a table that exists - declare it on the column with \`foreignKey\``);
 
-  for (int i = 0; i < mapping.count(); ++i) {
-
-    const char *local = mapping.keyAt(i);
-
-    locals.push(local);
-    foreigns.push(mapping.get(local).text());
+  for (pair in mapping) {
+    locals.push(pair.keyOf());
+    foreigns.push(pair.text());
   }
 
   return foreignKey(self, table, referenced, name, locals.items,
@@ -805,7 +809,7 @@ int dbmBaseReferences(driver_t *self, dbm_text_t *out, const char *table,
   if (strcmp(mapping.kind(), "string") == 0)
     foreign = mapping.text();
   else if (strcmp(mapping.kind(), "object") == 0 && mapping.count() == 1)
-    foreign = mapping.get(mapping.keyAt(0)).text();
+    foreign = mapping[0];
   else
     return dbmFail(self, TEXT`the foreign key on ${table}.${column} maps more than this one column, which only a table-level key can say`);
 
@@ -872,13 +876,9 @@ int dbmBaseCreateTable(driver_t *self, const char *table, json_t spec) {
   if (columns.count() == 0)
     return dbmFail(self, TEXT`table ${table} with no columns`);
 
-  for (int i = 0; i < columns.count(); ++i) {
-
-    const char *name = columns.keyAt(i);
-
-    if (columns.get(name).primaryKey.truth())
-      keys.push(name);
-  }
+  for (column in columns)
+    if (column.primaryKey.truth())
+      keys.push(column.keyOf());
 
   dbm_column_options_t options = {keys.count == 1};
 
@@ -890,14 +890,14 @@ int dbmBaseCreateTable(driver_t *self, const char *table, json_t spec) {
   self->quoteName(self, &sql, table);
   sql.put(" (");
 
-  for (int i = 0; i < columns.count(); ++i) {
+  int written = 0;
 
-    const char *name = columns.keyAt(i);
+  for (column in columns) {
 
-    if (i > 0)
+    if (written++ > 0)
       sql.put(", ");
 
-    if (self->columnDef(self, &sql, table, name, columns.get(name), &options))
+    if (self->columnDef(self, &sql, table, column.keyOf(), column, &options))
       return -1;
   }
 
@@ -923,13 +923,12 @@ int dbmBaseCreateTable(driver_t *self, const char *table, json_t spec) {
   if (self->inlineForeignKeys)
     return 0;
 
-  for (int i = 0; i < columns.count(); ++i) {
+  for (column in columns) {
 
-    const char *name = columns.keyAt(i);
-    json_t key = columns.get(name).foreignKey;
+    json_t key = column.foreignKey;
 
     if (strcmp(key.kind(), "object") == 0 &&
-        columnForeignKey(self, table, name, key))
+        columnForeignKey(self, table, column.keyOf(), key))
       return -1;
   }
 
@@ -1028,8 +1027,8 @@ int dbmBaseAddIndex(driver_t *self, const char *table, const char *name,
   if (strcmp(columns.kind(), "string") == 0)
     names.push(columns.text());
   else
-    for (int i = 0; i < columns.count(); ++i)
-      names.push(columns[i].text());
+    for (column in columns)
+      names.push(column.text());
 
   if (names.count == 0)
     return dbmFail(self, TEXT`index ${name} on ${table} with no columns`);
@@ -1089,13 +1088,14 @@ static sql_value_t parameterOf(json_t value, texts_t *texts) {
   if (strcmp(kind, "bool") == 0)
     return sqlTruth(value.truth());
 
+  /* whole or not, as dbmBaseValueLiteral tells them apart */
   if (strcmp(kind, "number") == 0)
     return yyjson_mut_is_real(value._node) ? sqlReal(value.real())
                                       : sqlNumber(value.number());
 
   if (strcmp(kind, "object") == 0 || strcmp(kind, "array") == 0) {
 
-    char *text = yyjson_mut_val_write(value._node, 0, NULL);
+    char *text = value.owned();
 
     texts->push(text);
     return sqlText(text);
@@ -1133,12 +1133,14 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row) {
   self->quoteName(self, &head, table);
   head.put(" (");
 
-  for (int i = 0; i < count; ++i) {
+  int at = 0;
 
-    if (i > 0)
+  for (column in row) {
+
+    if (at++ > 0)
       head.put(", ");
 
-    self->quoteName(self, &head, row.keyAt(i));
+    self->quoteName(self, &head, column.keyOf());
   }
 
   head.put(") VALUES (");
@@ -1148,9 +1150,11 @@ int dbmBaseInsert(driver_t *self, const char *table, json_t row) {
 
   chunks.push(head.text);
 
-  for (int i = 0; i < count; ++i) {
-    values.push(parameterOf(row.get(row.keyAt(i)), &texts));
-    chunks.push(i + 1 < count ? ", " : ")");
+  at = 0;
+
+  for (column in row) {
+    values.push(parameterOf(column, &texts));
+    chunks.push(++at < count ? ", " : ")");
   }
 
   sql_t query = SQL(chunks.items, chunks.count, values.items, values.count);
@@ -1190,9 +1194,7 @@ int dbmQueryParams(driver_t *self, const char *text, json_t params,
     chunks.push(mark + 1);
   }
 
-  int given = params._node != NULL && strcmp(params.kind(), "array") == 0
-                  ? params.count()
-                  : 0;
+  int given = strcmp(params.kind(), "array") == 0 ? params.count() : 0;
 
   /* no parameters, nothing back: sent as it is - MySQL prepares no BEGIN */
   if (chunks.count == 1 && rows == NULL && !read) {
@@ -1204,7 +1206,7 @@ int dbmQueryParams(driver_t *self, const char *text, json_t params,
   }
 
   for (size_t i = 0; i + 1 < chunks.count; ++i)
-    values.push((int)i < given ? parameterOf(params.at((int)i), &texts) : sqlNothing());
+    values.push((int)i < given ? parameterOf(params[(int)i], &texts) : sqlNothing());
 
   sql_t query = SQL(chunks.items, chunks.count, values.items, values.count);
   bool dry = self->dryRun;
@@ -1393,59 +1395,68 @@ driver_t *dbmDriverNew(const char *name, size_t size) {
 /* rows to insert, in every form node's insert takes                  */
 /* ------------------------------------------------------------------ */
 
-/** One row from column names and values, both arrays of the same length. */
-static bool rowFrom(yyjson_mut_doc *doc, yyjson_mut_val *into, json_t columns,
-                    json_t values, int from, char *why, size_t room) {
+/**
+ * One row from column names and values, both arrays of the same length.
+ *
+ * Put together with yyjson rather than with `set`, which writes over a key
+ * that is there already: a column named twice has always gone to the
+ * database twice, for the database to say what it thinks of that.
+ */
+static bool rowFrom(json_t into, json_t columns, json_t values, int from,
+                    char *why, size_t room) {
 
+  yyjson_mut_doc *doc = into._doc;
   yyjson_mut_val *row = yyjson_mut_obj(doc);
+  int at = from;
 
-  for (int i = 0; i < columns.count(); ++i) {
+  for (column in columns) {
 
-    json_t value = values.at(from + i);
+    json_t value = values[at++];
 
     if (value._node == NULL) {
       dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
       return false;
     }
 
-    yyjson_mut_obj_add(row, yyjson_mut_strcpy(doc, columns.at(i).text()),
+    yyjson_mut_obj_add(row, yyjson_mut_strcpy(doc, column.text()),
                        yyjson_mut_val_mut_copy(doc, value._node));
   }
 
-  yyjson_mut_arr_append(into, row);
+  yyjson_mut_arr_append(into._node, row);
   return true;
 }
 
 json_t dbmRowsOf(json_t rows, json_t values, char *why, size_t room) {
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *list = yyjson_mut_arr(doc);
+  json_t list = [];
   bool ok = true;
 
   why[0] = '\0';
-  yyjson_mut_doc_set_root(doc, list);
 
   if (!values.isNothing()) {
 
     /* columns, then one row of values or an array of them */
-    bool many = values.count() > 0 && strcmp(values.at(0).kind(), "array") == 0;
+    bool many = values.count() > 0 && strcmp(values[0].kind(), "array") == 0;
 
     if (strcmp(rows.kind(), "array") != 0 ||
         strcmp(values.kind(), "array") != 0) {
       dbmWrite(why, room, TEXT`insert needs the rows to insert`);
       ok = false;
     } else if (many) {
-      for (int i = 0; ok && i < values.count(); ++i) {
-        ok = values.at(i).count() == rows.count() &&
-             rowFrom(doc, list, rows, values.at(i), 0, why, room);
-        if (!ok && why[0] == '\0')
-          dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+      for (one in values) {
+        ok = one.count() == rows.count() &&
+             rowFrom(list, rows, one, 0, why, room);
+        if (!ok) {
+          if (why[0] == '\0')
+            dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
+          break;
+        }
       }
     } else if (values.count() != rows.count()) {
       dbmWrite(why, room, TEXT`The number of columns does not match the number of values.`);
       ok = false;
     } else {
-      ok = rowFrom(doc, list, rows, values, 0, why, room);
+      ok = rowFrom(list, rows, values, 0, why, room);
     }
   } else if (strcmp(rows.kind(), "object") == 0 &&
              strcmp(rows.columns.kind(), "array") == 0) {
@@ -1461,22 +1472,20 @@ json_t dbmRowsOf(json_t rows, json_t values, char *why, size_t room) {
     }
 
     for (int at = 0; ok && at < data.count(); at += width)
-      ok = rowFrom(doc, list, columns, data, at, why, room);
+      ok = rowFrom(list, columns, data, at, why, room);
   } else if (strcmp(rows.kind(), "object") == 0) {
-    yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows._node));
+    list.push(rows);
   } else if (strcmp(rows.kind(), "array") == 0) {
-    for (int i = 0; ok && i < rows.count(); ++i) {
-      if (strcmp(rows.at(i).kind(), "object") != 0) {
+    for (row in rows) {
+      if (strcmp(row.kind(), "object") != 0) {
         dbmWrite(why, room, TEXT`insert needs the rows to insert`);
-        ok = false;
-      } else {
-        yyjson_mut_arr_append(list, yyjson_mut_val_mut_copy(doc, rows.at(i)._node));
+        break;
       }
+      list.push(row);
     }
   } else {
     dbmWrite(why, room, TEXT`insert needs the rows to insert`);
-    ok = false;
   }
 
-  return meta_jsonFromMut(doc);
+  return list;
 }
