@@ -1,3 +1,23 @@
+## 0.6.1 (2026-10-11)
+
+What node db-migrate 1.8.1 fixed, followed; the ABI stays 1.
+
+### Bug Fixes
+
+* **work:** a job keeps its scope, `sc` as node 1.8.1 writes it, and runs
+  in it; `down` of a scope reverts the jobs of that scope only, `down` of
+  the top level no longer stops at the job of a scope sharing its database;
+  `work:<scope>` runs the jobs of a scope with a database of its own, and
+  `work:all` is refused
+* **state:** `fix --backup-state` keeps the jobs, seeds, purges, backups and
+  the records of dml migrations, all but the schema
+* **dml:** reverting a soft delete takes its mark out of the flag as a
+  whole, not out of `#10` when it is `#1`
+* **build:** builds with meta f4e60f8, whose ownership pass read three
+  correct things as a use after free; CI and the release take meta from
+  `wxone/meta:f4e60f8` rather than `latest`, which already releases
+  documents on its own and is not yet followed here
+
 ## 0.6.0 (2026-10-10)
 
 What node db-migrate added from 1.1.0 to 1.8.0, followed.
