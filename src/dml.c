@@ -123,7 +123,7 @@ static bool isArray(json_t value) {
 }
 
 static bool isTrue(json_t options, const char *key) {
-  json_t value = options.get(key);
+  json_t value = options[key];
   return value._node != NULL && strcmp(value.kind(), "bool") == 0 &&
          value.truth();
 }
@@ -156,23 +156,20 @@ static long numberOf(yyjson_mut_val *entry, const char *key) {
 /* statements                                                         */
 /* ------------------------------------------------------------------ */
 
-/** SQL with `?` for its parameters, and the parameters. */
+/** SQL with `?` for its parameters, and the parameters, for the driver. */
 typedef struct {
   dbm_text_t sql;
-  yyjson_mut_doc *doc;
-  yyjson_mut_val *params;
+  json_t params;
 } statement_t;
 
 static void opened(statement_t *s) {
   memset(s, 0, sizeof *s);
-  s->doc = yyjson_mut_doc_new(NULL);
-  s->params = yyjson_mut_arr(s->doc);
-  yyjson_mut_doc_set_root(s->doc, s->params);
+  s->params = meta_toJSON("[]");
 }
 
 static void closed(statement_t *s) {
   s->sql.release();
-  yyjson_mut_doc_free(s->doc);
+  s->params.release();
 }
 
 static void quoted(dml_t *self, dbm_text_t *out, const char *name) {
@@ -180,15 +177,17 @@ static void quoted(dml_t *self, dbm_text_t *out, const char *name) {
 }
 
 static void param(statement_t *s, json_t value) {
-  yyjson_mut_arr_append(s->params, copyIn(s->doc, value));
+  s->params.push(value);
 }
 
 static void paramText(statement_t *s, const char *text) {
-  yyjson_mut_arr_add_strcpy(s->doc, s->params, text);
+  s->params.push(text);
 }
 
+/** A value of the record, copied into the statement's own document. */
 static void paramMut(statement_t *s, yyjson_mut_val *value) {
-  yyjson_mut_arr_append(s->params, yyjson_mut_val_mut_copy(s->doc, value));
+  yyjson_mut_arr_append(s->params._node,
+                        yyjson_mut_val_mut_copy(s->params._doc, value));
 }
 
 /** One statement after another: the text and the parameters of `from`. */
@@ -197,8 +196,8 @@ static void followedBy(statement_t *to, statement_t *from) {
   if (from->sql.text != NULL)
     to->sql.put(from->sql.text);
 
-  for (size_t i = 0; i < yyjson_mut_arr_size(from->params); ++i)
-    paramMut(to, yyjson_mut_arr_get(from->params, i));
+  for (value in from->params)
+    param(to, value);
 }
 
 /** Sent - or, `read`, also in a dry run - with the rows wanted or not. */
@@ -207,15 +206,10 @@ static int sent(dml_t *self, statement_t *s, json_t *rows, bool read) {
   if (s->sql.failed || s->sql.text == NULL)
     return fail(self, TEXT`out of memory writing a statement`);
 
-  char *text = yyjson_mut_write(s->doc, 0, NULL);
-  json_t params = meta_toJSON(text != NULL ? text : "[]");
+  if (dbmQueryParams(self->driver, s->sql.text, s->params, rows, read))
+    return failedDriver(self);
 
-  free(text);
-
-  int answer = dbmQueryParams(self->driver, s->sql.text, params, rows, read);
-
-  params.release();
-  return answer != 0 ? failedDriver(self) : 0;
+  return 0;
 }
 
 /** A statement without parameters. */
@@ -315,7 +309,7 @@ static yyjson_mut_val *keyOf(dml_t *self, const char *table, json_t options,
                              const char *action) {
 
   yyjson_mut_val *key = yyjson_mut_arr(self->record);
-  json_t given = options.get("key");
+  json_t given = options["key"];
 
   if (isText(given)) {
     yyjson_mut_arr_add_strcpy(self->record, key, given.text());
@@ -323,8 +317,8 @@ static yyjson_mut_val *keyOf(dml_t *self, const char *table, json_t options,
   }
 
   if (isArray(given) && given.count() > 0) {
-    for (int i = 0; i < given.count(); ++i)
-      yyjson_mut_arr_add_strcpy(self->record, key, given.at(i).text());
+    for (name in given)
+      yyjson_mut_arr_add_strcpy(self->record, key, name.text());
     return key;
   }
 
@@ -370,15 +364,15 @@ static int whereOf(dml_t *self, statement_t *into, json_t where) {
     return 0;
   }
 
-  if (isArray(where) && where.count() > 0 && isText(where.at(0))) {
+  if (isArray(where) && where.count() > 0 && isText(where[0])) {
 
-    json_t params = where.at(1);
+    json_t params = where[1];
 
-    into->sql.put(where.at(0).text());
+    into->sql.put(where[0].text());
 
     if (isArray(params))
-      for (int i = 0; i < params.count(); ++i)
-        param(into, params.at(i));
+      for (value in params)
+        param(into, value);
 
     return 0;
   }
@@ -393,8 +387,8 @@ static int whereOf(dml_t *self, statement_t *into, json_t where) {
 
   for (int i = 0; i < where.count(); ++i) {
 
-    const char *column = where.keyAt(i);
-    json_t value = where.get(column);
+    json_t value = where[i];
+    const char *column = value.keyOf();
 
     if (i > 0)
       into->sql.put(" AND ");
@@ -414,7 +408,7 @@ static int whereOf(dml_t *self, statement_t *into, json_t where) {
 
       for (int j = 0; j < value.count(); ++j) {
         into->sql.put(j > 0 ? ", ?" : "?");
-        param(into, value.at(j));
+        param(into, value[j]);
       }
 
       into->sql.put(")");
@@ -441,7 +435,7 @@ static void byKey(dml_t *self, statement_t *into, json_t rows,
 
     for (int i = 0; i < rows.count(); ++i) {
       into->sql.put(i > 0 ? ", ?" : "?");
-      param(into, rows.at(i).get(k));
+      param(into, rows[i][k]);
     }
 
     into->sql.put(")");
@@ -461,7 +455,7 @@ static void byKey(dml_t *self, statement_t *into, json_t rows,
 
       quoted(self, &into->sql, k);
       into->sql.put(" = ?");
-      param(into, rows.at(i).get(k));
+      param(into, rows[i][k]);
     }
 
     into->sql.put(")");
@@ -470,7 +464,7 @@ static void byKey(dml_t *self, statement_t *into, json_t rows,
 
 static long batchOf(dml_t *self, json_t options) {
 
-  json_t batch = options.get("batch");
+  json_t batch = options.batch;
 
   if (batch._node != NULL && strcmp(batch.kind(), "number") == 0 &&
       batch.number() > 0)
@@ -878,16 +872,15 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
 
   free(row);
 
-  for (int i = 0; i < registry.count(); ++i) {
+  for (entry in registry) {
 
-    const char *backup = registry.keyAt(i);
-    json_t entry = registry.get(backup);
-    const char *migration = entry.get("m").text();
+    const char *backup = entry.keyOf();
+    const char *migration = entry.m;
     yyjson_mut_val *group = yyjson_mut_obj_get(root, migration);
 
     if (group == NULL) {
 
-      json_t release = entry.get("r");
+      json_t release = entry.r;
 
       group = yyjson_mut_obj(groups);
       yyjson_mut_obj_add_int(groups, group, "age",
@@ -903,8 +896,6 @@ static yyjson_mut_doc *backupsOf(dml_t *self, bool all) {
     yyjson_mut_arr_add_strcpy(groups, yyjson_mut_obj_get(group, "backups"),
                               backup);
   }
-
-  registry.release();
 
   if (all)
     return groups;
@@ -1286,22 +1277,15 @@ static int insertRows(dml_t *self, const char *table, json_t rows,
     closed(&again);
   }
 
+  /* the rows are this insert's own, so they are marked where they are */
   for (int i = 0; answer == 0 && i < rows.count(); ++i) {
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *row = yyjson_mut_val_mut_copy(doc, rows.at(i)._node);
+    json_t row = rows[i];
 
-    if (!irreversible) {
-      yyjson_mut_obj_remove_key(row, FLAG);
-      yyjson_mut_obj_add_strcpy(doc, row, FLAG, flag);
-    }
+    if (!irreversible)
+      row[FLAG] = flag;
 
-    yyjson_mut_doc_set_root(doc, row);
-
-    json_t marked = meta_jsonFromMut(doc);
-
-    answer = self->driver->insert(self->driver, table, marked);
-    marked.release();
+    answer = self->driver->insert(self->driver, table, row);
   }
 
   return finished(self, ended(self, answer));
@@ -1384,7 +1368,7 @@ int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
 
   for (size_t i = 0; key != NULL && i < yyjson_mut_arr_size(key); ++i) {
     const char *k = textOf(yyjson_mut_arr_get(key, i));
-    if (set.get(k)._node != NULL)
+    if (set[k]._node != NULL)
       changed.append(TEXT`${changed.length > 0 ? ", " : ""}${k}`);
   }
 
@@ -1420,7 +1404,7 @@ int dml_t__updateWith(dml_t *self, const char *table, json_t set, json_t where,
       change.sql.put(", ");
     quoted(self, &change.sql, set.keyAt(i));
     change.sql.put(" = ?");
-    param(&change, set.get(set.keyAt(i)));
+    param(&change, set[i]);
   }
 
   change.sql.put(" WHERE ");
@@ -1530,9 +1514,9 @@ static void markedBy(dml_t *self, statement_t *into, const char *mark,
 static int softDelete(dml_t *self, const char *table, json_t where,
                       json_t options) {
 
-  json_t column = options.get("column");
-  json_t purge = options.get("purge");
-  bool time = options.get("value")._node == NULL;
+  json_t column = options.column;
+  json_t purge = options.purge;
+  bool time = options.value._node == NULL;
 
   if (!isText(column))
     return fail(self, TEXT`delete("${table}") in soft mode needs the column marking the rows as deleted, { mode: 'soft', column: 'deleted_at' }`);
@@ -1622,7 +1606,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
   change.sql.put(" WHERE ");
 
   if (!time)
-    param(&change, options.get("value"));
+    param(&change, options.value);
 
   paramText(&change, mark);
 
@@ -1646,7 +1630,7 @@ static int softDelete(dml_t *self, const char *table, json_t where,
     closed(&longer);
 
     if (answer == 0) {
-      long many = (long)rows.at(0).get("n").number();
+      long many = rows[0].n;
       rows.release();
       if (many > 0)
         answer = fail(self, TEXT`delete("${table}") in soft mode can not mark ${many} row(s), their ${FLAG} would be longer than the 255 characters MySQL keeps of it`);
@@ -1678,7 +1662,7 @@ int dml_t__deleteWith(dml_t *self, const char *table, json_t where,
   if (self->failed)
     return -1;
 
-  json_t mode = options.get("mode");
+  json_t mode = options.mode;
   const char *how = isText(mode) ? mode.text() : "copy";
 
   if (strcmp(how, "soft") == 0)
@@ -1824,9 +1808,9 @@ int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
     return -1;
 
   bool irreversible = isTrue(options, "irreversible");
-  json_t revert = options.get("revert");
+  json_t revert = options.revert;
   bool given = isText(revert) ||
-               (isArray(revert) && revert.count() > 0 && isText(revert.at(0)));
+               (isArray(revert) && revert.count() > 0 && isText(revert[0]));
 
   if (!irreversible && !given)
     return fail(self, TEXT`runSql in a dml migration needs the SQL reverting it, runSql(sql, { revert: 'sql' }), or { irreversible: true } to run it without being able to revert it.`);
@@ -1845,8 +1829,8 @@ int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
     yyjson_mut_arr_add_strcpy(self->record, args, revert.text());
     yyjson_mut_arr_append(args, yyjson_mut_arr(self->record));
   } else {
-    json_t revertParams = revert.at(1);
-    yyjson_mut_arr_add_strcpy(self->record, args, revert.at(0).text());
+    json_t revertParams = revert[1];
+    yyjson_mut_arr_add_strcpy(self->record, args, revert[0].text());
     yyjson_mut_arr_append(args, isArray(revertParams)
                                     ? copyIn(self->record, revertParams)
                                     : yyjson_mut_arr(self->record));
@@ -1861,8 +1845,8 @@ int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
   s.sql.put(sql);
 
   if (isArray(params))
-    for (int i = 0; i < params.count(); ++i)
-      param(&s, params.at(i));
+    for (value in params)
+      param(&s, value);
 
   int answer = alone(self, &s);
 
@@ -1924,7 +1908,7 @@ json_t dml_t__all(dml_t *self, sql_t query) {
   bool dry = self->driver->dryRun;
 
   if (self->failed)
-    return meta_toJSON("[]");
+    return [];
 
   /* reading is no step, and a dry run reads too */
   self->driver->dryRun = false;
@@ -1935,7 +1919,7 @@ json_t dml_t__all(dml_t *self, sql_t query) {
 
   if (answer != 0) {
     failedDriver(self);
-    return meta_toJSON("[]");
+    return [];
   }
 
   return rows;
@@ -2018,7 +2002,7 @@ static int revertUpdate(dml_t *self, yyjson_mut_val *args) {
 
     for (int r = 0; answer == 0 && r < count; ++r) {
 
-      json_t row = rows.at(r);
+      json_t row = rows[r];
       statement_t s;
 
       opened(&s);
@@ -2032,7 +2016,7 @@ static int revertUpdate(dml_t *self, yyjson_mut_val *args) {
           s.sql.put(", ");
         quoted(self, &s.sql, c);
         s.sql.put(" = ?");
-        param(&s, row.get(c));
+        param(&s, row[c]);
       }
 
       s.sql.put(" WHERE ");
@@ -2043,7 +2027,7 @@ static int revertUpdate(dml_t *self, yyjson_mut_val *args) {
           s.sql.put(" AND ");
         quoted(self, &s.sql, k);
         s.sql.put(" = ?");
-        param(&s, row.get(k));
+        param(&s, row[k]);
       }
 
       answer = sent(self, &s, NULL, false);
@@ -2085,7 +2069,7 @@ static int revertDelete(dml_t *self, yyjson_mut_val *args) {
     return 0;
   }
 
-  json_t row = rows.at(0);
+  json_t row = rows[0];
   dbm_text_t columns = {0};
 
   for (int i = 0; i < row.count(); ++i) {
@@ -2495,21 +2479,20 @@ int dbmRunJob(driver_t *driver, dbm_state_t *state,
 
   /* how far an earlier run of it got, from the job */
   json_t read = meta_toJSON(jobs);
-  json_t was = read.get("jobs").get(job->name);
-  const char *h = strcmp(was.get("h").kind(), "string") == 0 ? was.get("h").text() : "";
+  json_t was = read.jobs[job->name];
+  const char *h = isText(was.h) ? was.h.text() : "";
 
   free(jobs);
 
-  if (was.get("step").number() > 0) {
+  if (was.step.number() > 0) {
     interrupted.found = true;
-    interrupted.step = was.get("step").number();
-    interrupted.learned = was.get("learned").number();
-    interrupted.done = was.get("done").number();
-    interrupted.rollback = was.get("rb").number() == 1;
+    interrupted.step = was.step;
+    interrupted.learned = was.learned;
+    interrupted.done = was.done;
+    interrupted.rollback = was.rb.number() == 1;
     interrupted.changed = h[0] != '\0' && hash != NULL && strcmp(h, hash) != 0;
   }
 
-  read.release();
   db.record = dbmRecordFrom(stored);
   free(stored);
 
