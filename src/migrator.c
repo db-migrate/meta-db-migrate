@@ -363,8 +363,8 @@ void dbmRegisterMeta(const char *file, json_t meta) {
   const char *shownName = strrchr(entry->name, '/') != NULL
                               ? strrchr(entry->name, '/') + 1
                               : entry->name;
-  json_t release = meta.get("release");
-  json_t type = meta.get("type");
+  json_t release = meta["release"];   /* the dot would be the method */
+  json_t type = meta.type;
   char why[600] = "";
 
   /* node's labels are anything, said as text: 2 is "2" */
@@ -376,17 +376,16 @@ void dbmRegisterMeta(const char *file, json_t meta) {
     entry->release = kept(number);
   }
 
-  if (strcmp(meta.get("recovery").kind(), "string") == 0)
-    entry->recovery = kept(meta.get("recovery").text());
+  if (strcmp(meta.recovery.kind(), "string") == 0)
+    entry->recovery = kept(meta.recovery.text());
 
-  if (strcmp(meta.get("transactions").kind(), "bool") == 0 &&
-      !meta.get("transactions").truth())
+  if (strcmp(meta.transactions.kind(), "bool") == 0 && !meta.transactions.truth())
     entry->noTransaction = true;
 
-  entry->background = strcmp(meta.get("background").kind(), "bool") == 0 &&
-                      meta.get("background").truth();
-  entry->blocking = strcmp(meta.get("blocking").kind(), "bool") == 0 &&
-                    meta.get("blocking").truth();
+  entry->background = strcmp(meta.background.kind(), "bool") == 0 &&
+                      meta.background.truth();
+  entry->blocking = strcmp(meta.blocking.kind(), "bool") == 0 &&
+                    meta.blocking.truth();
 
   /* what node refuses when the migration runs, refused then here too */
   if (strcmp(type.kind(), "nothing") != 0 &&
