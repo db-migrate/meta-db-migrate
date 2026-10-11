@@ -496,7 +496,7 @@ This repository only uses it. meta bakes that path into itself, so it has to
 stay at `/opt/meta`:
 
 ```sh
-docker create --name meta wxone/meta:90db752
+docker create --name meta wxone/meta:cc24ba0
 sudo docker cp meta:/opt/meta /opt/meta && docker rm meta
 META_ROOT=/opt/meta ./build.sh
 ```
