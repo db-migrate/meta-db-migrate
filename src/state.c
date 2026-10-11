@@ -847,8 +847,14 @@ int dbmStateBackup(dbm_state_t *self) {
 
   dbmSay(stdout, TEXT`[INFO] [state] Created a backup of ${self->table} by writing to file ${file}\n`);
 
+  /*
+   * All but the schema, as fix without a backup keeps them: fix learns the
+   * schema and the records of v2 migrations again, not the jobs, seeds,
+   * purges, backups and the records of dml migrations it skips.
+   */
   if (self->db->renameTable(self->db, self->table, name) ||
       dbmKvCreate(self->db, self->table) ||
+      dbmKvCopy(self->db, name, self->table, SCHEMA) ||
       dbmKvInsert(self->db, self->table, SCHEMA, "{}"))
     return -1;
 

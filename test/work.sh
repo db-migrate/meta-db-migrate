@@ -358,6 +358,22 @@ run work:billing --interval 10 >/dev/null 2>&1
 expect "work:billing runs them there" "1 billing/20261009000011-b2 {}" \
   "$(sqlite3 "$dir/billing.db" "select paid from bills; select name from migrations where name like '%b2'; select json_extract(value, '\$.jobs') from migrations_state where key = '__dbmigrate_jobs__'" 2>&1 | tr '\n' ' ' | sed 's/ $//')"
 
+# ------------------------------------------- fix --backup-state keeps jobs
+
+project backup "$BACKGROUND"
+run up >/dev/null 2>&1
+kept() {
+  lite "select group_concat(key, ' ') from (select key from migrations_state
+    where key not in ('__dbmigrate_schema__', '__dbmigrate_state__') order by key)"
+}
+before=$(kept)
+run fix --backup-state >fix.out 2>&1
+expect "fix --backup-state keeps the jobs and the records of dml migrations" \
+  "$before" "$(kept)"
+run work --interval 10 >/dev/null 2>&1
+run down >/dev/null 2>&1
+expect "and they still run and revert" "$ORIGINAL" "$(pets)"
+
 # ------------------------------------------------ background needs dml
 
 dir="$work/notdml"

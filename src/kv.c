@@ -113,6 +113,28 @@ int dbmKvInsert(driver_t *self, const char *table, const char *key,
   return asked(self, &query, NULL);
 }
 
+int dbmKvCopy(driver_t *self, const char *from, const char *to,
+              const char *except) {
+
+  sql_t f = quoted(self, from);
+  sql_t t = quoted(self, to);
+  sql_t k = quoted(self, "key");
+  sql_t v = quoted(self, "value");
+  sql_t r = quoted(self, "run_on");
+  defer f.release();
+  defer t.release();
+  defer k.release();
+  defer v.release();
+  defer r.release();
+
+  sql_t query = SQL`INSERT INTO ${&t} (${&k}, ${&v}, ${&r})
+                    SELECT ${&k}, ${&v}, ${&r} FROM ${&f}
+                    WHERE ${&k} <> ${except}`;
+  defer query.release();
+
+  return asked(self, &query, NULL);
+}
+
 int dbmKvUpdate(driver_t *self, const char *table, const char *key,
                 const char *value) {
 

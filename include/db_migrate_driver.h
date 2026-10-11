@@ -310,6 +310,10 @@ int dbmKvSwap(driver_t *self, const char *table, const char *key,
               const char *value, const char *expected);
 int dbmKvDelete(driver_t *self, const char *table, const char *key);
 
+/** Every row of `from` but the one keyed `except` added to `to`. */
+int dbmKvCopy(driver_t *self, const char *from, const char *to,
+              const char *except);
+
 /* ---------------------------------------------------- node's state */
 
 #include <pthread.h>
