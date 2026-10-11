@@ -2155,10 +2155,19 @@ static int revertSoft(dml_t *self, yyjson_mut_val *args) {
   quoted(self, &change.sql, column);
   change.sql.put(" = NULL, ");
   quoted(self, &change.sql, FLAG);
-  change.sql.put(" = NULLIF(REPLACE(");
-  quoted(self, &change.sql, FLAG);
-  change.sql.put(", ?, ''), '') WHERE ");
-  paramText(&change, mark);
+
+  /* the mark as a whole: `|del:m#1|` out of the flag with a `|` after it */
+  bool mysql = strcmp(self->driver->name, "mysql") == 0;
+  dbm_text_t followed = {0};
+
+  followed.append(TEXT`${mark}|`);
+  change.sql.put(mysql ? " = NULLIF(TRIM(TRAILING '|' FROM REPLACE("
+                       : " = NULLIF(RTRIM(REPLACE(");
+  concatenated(self, &change.sql);
+  change.sql.put(mysql ? ", ?, '|')), '') WHERE " : ", ?, '|'), '|'), '') WHERE ");
+  paramText(&change, "|");
+  paramText(&change, followed.text);
+  followed.release();
 
   int answer = untilDone(self, table, key, &condition, BATCH, &change);
 
