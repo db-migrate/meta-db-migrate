@@ -115,14 +115,19 @@ static const char *holderOf(json_t row) {
 /* the lock row                                                       */
 /* ------------------------------------------------------------------ */
 
-/** `s[key] = value`, in its place if it is there, at the end if not. */
-static void setField(yyjson_mut_doc *doc, yyjson_mut_val *s, const char *key,
-                     yyjson_mut_val *value) {
+/**
+ * `s[key] = value`, in its place if it is there, at the end if not. Not
+ * `s.key = value`: `set` takes a key out and puts it back at the end, and
+ * this row is compared with node's and read by node, field for field.
+ */
+static void setField(json_t s, const char *key, json_value_t value) {
 
-  if (yyjson_mut_obj_get(s, key) != NULL)
-    yyjson_mut_obj_replace(s, yyjson_mut_str(doc, key), value);
+  yyjson_mut_val *made = jsonValueNode(s._doc, value);
+
+  if (yyjson_mut_obj_get(s._node, key) != NULL)
+    yyjson_mut_obj_replace(s._node, yyjson_mut_str(s._doc, key), made);
   else
-    yyjson_mut_obj_add(s, yyjson_mut_strcpy(doc, key), value);
+    yyjson_mut_obj_add(s._node, yyjson_mut_strcpy(s._doc, key), made);
 }
 
 /**
@@ -137,9 +142,8 @@ static char *rewritten(dbm_state_t *self, const char *value,
                        const char *changes, bool release) {
 
   json_t old = meta_toJSON(value);
-  defer old.release();
   json_t change = meta_toJSON(changes);
-  defer change.release();
+  json_t was = old.s;
 
   char date[40];
   char n[17];
@@ -147,34 +151,32 @@ static char *rewritten(dbm_state_t *self, const char *value,
   isoDate(date, sizeof date);
   nonce(n);
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_val *s = strcmp(old.s.kind(), "object") == 0
-                          ? yyjson_mut_val_mut_copy(doc, old.s._node)
-                          : yyjson_mut_obj(doc);
+  json_t row = {s: was};
+
+  if (strcmp(was.kind(), "object") != 0)
+    row.s = {};
+
+  json_t s = row.s;
 
   /* node's first fields, in node's order, for a row that has none */
-  if (yyjson_mut_obj_get(s, "step") == NULL)
-    setField(doc, s, "step", yyjson_mut_int(doc, 0));
+  if (strcmp(s.step.kind(), "nothing") == 0)
+    setField(s, "step", 0);
 
-  if (yyjson_mut_obj_get(s, "fin") == NULL)
-    setField(doc, s, "fin", yyjson_mut_int(doc, 0));
+  if (strcmp(s.fin.kind(), "nothing") == 0)
+    setField(s, "fin", 0);
 
-  for (int i = 0; i < change.count(); ++i)
-    setField(doc, s, change.keyAt(i),
-             yyjson_mut_val_mut_copy(doc, change.get(change.keyAt(i))._node));
+  for (field in change)
+    setField(s, field.keyOf(), field);
 
-  setField(doc, s, "ID", release ? yyjson_mut_int(doc, 0)
-                                 : yyjson_mut_strcpy(doc, self->id));
-  setField(doc, s, "date", yyjson_mut_strcpy(doc, date));
-  setField(doc, s, "n", yyjson_mut_strcpy(doc, n));
-  yyjson_mut_obj_add_val(doc, root, "s", s);
-  yyjson_mut_doc_set_root(doc, root);
+  if (release)
+    setField(s, "ID", 0);
+  else
+    setField(s, "ID", self->id);
 
-  char *text = yyjson_mut_write(doc, 0, NULL);
+  setField(s, "date", date);
+  setField(s, "n", n);
 
-  yyjson_mut_doc_free(doc);
-  return text;
+  return row.owned();
 }
 
 static void stopHeartbeat(dbm_state_t *self);
@@ -286,8 +288,6 @@ static bool claim(dbm_state_t *self, char *row) {
   json_t parsed = meta_toJSON(row);
   bool mine = strcmp(holderOf(parsed), self->id) == 0;
 
-  parsed.release();
-
   if (!mine) {
     free(row);
     return false;
@@ -328,21 +328,8 @@ static int acquire(dbm_state_t *self, const char *stale, int retries) {
     isoDate(date, sizeof date);
     nonce(n);
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_val *s = yyjson_mut_obj(doc);
-
-    yyjson_mut_obj_add_int(doc, s, "step", 0);
-    yyjson_mut_obj_add_int(doc, s, "fin", 1);
-    yyjson_mut_obj_add_strcpy(doc, s, "ID", self->id);
-    yyjson_mut_obj_add_strcpy(doc, s, "date", date);
-    yyjson_mut_obj_add_strcpy(doc, s, "n", n);
-    yyjson_mut_obj_add_val(doc, root, "s", s);
-    yyjson_mut_doc_set_root(doc, root);
-
-    char *value = yyjson_mut_write(doc, 0, NULL);
-
-    yyjson_mut_doc_free(doc);
+    json_t fresh = {s: {step: 0, fin: 1, ID: self->id, date: date, n: n}};
+    char *value = fresh.owned();
 
     /* somebody else may have inserted first; the read decides */
     dbmKvInsert(self->db, self->table, LOCK, value);
@@ -360,10 +347,6 @@ static int acquire(dbm_state_t *self, const char *stale, int retries) {
   long fin = parsed.s.fin;
   long step = parsed.s.step;
   const char *since = parsed.s.date;
-  char when[64];
-
-  dbmWrite(when, sizeof when, TEXT`${since}`);
-  parsed.release();
 
   if (other) {
 
@@ -373,9 +356,9 @@ static int acquire(dbm_state_t *self, const char *stale, int retries) {
     }
 
     if (fin == 0)
-      dbmSay(stderr, TEXT`[WARN] [state] taking over a stale migration lock from ${when}, the previous run was interrupted during a migration at step ${step}\n`);
+      dbmSay(stderr, TEXT`[WARN] [state] taking over a stale migration lock from ${since}, the previous run was interrupted during a migration at step ${step}\n`);
     else
-      dbmSay(stderr, TEXT`[WARN] [state] taking over a stale migration lock from ${when}\n`);
+      dbmSay(stderr, TEXT`[WARN] [state] taking over a stale migration lock from ${since}\n`);
   }
 
   char *value = rewritten(self, row, "{}", false);
@@ -407,7 +390,6 @@ static int acquire(dbm_state_t *self, const char *stale, int retries) {
   if (kept != NULL) {
     json_t now = meta_toJSON(kept);
     free_ = holderOf(now)[0] == '\0';
-    now.release();
   }
 
   free(kept);
@@ -451,8 +433,6 @@ static char *waitForRelease(dbm_state_t *self) {
     json_t parsed = meta_toJSON(row);
     const char *holder = holderOf(parsed);
     bool other = holder[0] != '\0' && strcmp(holder, self->id) != 0;
-
-    parsed.release();
 
     if (!other) {
       free(row);
@@ -541,34 +521,38 @@ int dbmStateMark(dbm_state_t *self, const char *changes) {
 
 int dbmStateProgress(dbm_state_t *self, int step, int fin) {
 
-  dbm_text_t changes = {0};
-  defer changes.release();
-
-  changes.put("{");
+  json_t changes = {};
 
   if (step >= 0)
-    changes.append(TEXT`"step":${(long)step}`);
+    changes.step = step;
 
   if (fin >= 0)
-    changes.append(TEXT`${step >= 0 ? "," : ""}"fin":${(long)fin}`);
+    changes.fin = fin;
 
   /* a migration that ends is not rolling back any more, as node has it */
   if (fin == 1)
-    changes.put(",\"rb\":0");
+    changes.rb = 0;
 
-  changes.put("}");
+  char *text = changes.owned();
 
-  if (changes.failed)
+  if (text == NULL)
     return dbmFail(self->db, TEXT`out of memory writing the lock row`);
 
-  return dbmStateMark(self, changes.text);
+  defer free(text);
+  return dbmStateMark(self, text);
 }
 
 /* ------------------------------------------------------------------ */
 /* the schema, and one migration's record                             */
 /* ------------------------------------------------------------------ */
 
-/** `{i, c, f, e}` with whatever of it the stored text has. */
+/**
+ * `{i, c, f, e}` with whatever of it the stored text has.
+ *
+ * In yyjson's own terms: the state keeps the schema as a bare yyjson
+ * document, which is how every file that learns into it reads it, and the
+ * note a json_t carries would have nobody to free it.
+ */
 static void *schemaFrom(const char *text) {
 
   yyjson_doc *read = yyjson_read(text, strlen(text), 0);
@@ -720,7 +704,6 @@ char *dbmStateBegin(dbm_state_t *self, const char *key, const char *op,
   }
 
   json_t lock = meta_toJSON(row != NULL ? row : "{}");
-  defer lock.release();
   free(row);
 
   json_t was = lock.s;
@@ -755,17 +738,15 @@ char *dbmStateBegin(dbm_state_t *self, const char *key, const char *op,
     dbmSay(stderr, TEXT`[WARN] [state] ignoring the interrupted ${was.o.text()} of migration "${running}" at step ${was.step.number()}\n`);
   }
 
-  dbm_text_t changes = {0};
-  defer changes.release();
+  /* no hash is a null, as node writes one */
+  json_t changes = {step: 0, fin: 0, f: key, o: op, learned: 0, done: 0,
+                    rb: 0, h: hash};
+  char *text = changes.owned();
+  bool marked = text != NULL && dbmStateMark(self, text) == 0;
 
-  changes.append(TEXT`{"step":0,"fin":0,"f":"${key}","o":"${op}","learned":0,"done":0,"rb":0,"h":`);
+  free(text);
 
-  if (hash != NULL)
-    changes.append(TEXT`"${hash}"}`);
-  else
-    changes.put("null}");
-
-  if (changes.failed || dbmStateMark(self, changes.text)) {
+  if (!marked) {
     free(record);
     return NULL;
   }
@@ -824,25 +805,13 @@ int dbmStateBackup(dbm_state_t *self) {
     return dbmFail(self->db, TEXT`could not write ${file}`);
   }
 
-  /* the row as node writes it: key, value */
-  dbmSay(out, TEXT`{"key":"${SCHEMA}","value":`);
+  /* the row as node writes it: key, value - the schema in it as text */
+  json_t row = {key: SCHEMA, value: schema};
+  char *written = row.owned();
 
-  char *quoted;
-
-  /* the schema is text inside the row, so it is written as a JSON string */
-  {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *value = yyjson_mut_strcpy(doc, schema);
-
-    yyjson_mut_doc_set_root(doc, value);
-    quoted = yyjson_mut_write(doc, 0, NULL);
-    yyjson_mut_doc_free(doc);
-  }
-
-  fputs(quoted != NULL ? quoted : "\"\"", out);
-  fputs("}", out);
+  fputs(written != NULL ? written : "", out);
   fclose(out);
-  free(quoted);
+  free(written);
   free(schema);
 
   dbmSay(stdout, TEXT`[INFO] [state] Created a backup of ${self->table} by writing to file ${file}\n`);
