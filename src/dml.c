@@ -128,21 +128,25 @@ static bool isTrue(json_t options, const char *key) {
          value.truth();
 }
 
-static yyjson_mut_val *copyIn(yyjson_mut_doc *doc, json_t value) {
-  return value._node != NULL ? yyjson_mut_val_mut_copy(doc, value._node)
-                            : yyjson_mut_null(doc);
-}
+/**
+ * A value of a document somebody else frees, as a json_t: the record, which
+ * reaches here as yyjson's because that is how the ABI hands it over, or a
+ * document handed on through a `void *`. `_shared` is the runtime's word for
+ * "not this value's to free", so neither meta nor a release frees anything
+ * through it. Into the record a value is written with `=`, which copies,
+ * never with `&`: the pools `&` takes in are only freed by a json_t's
+ * release, and the record is freed with yyjson_mut_doc_free.
+ */
+static json_t viewOf(yyjson_mut_doc *doc, yyjson_mut_val *node) {
 
-/** A field of a step's entry set, where it is or added at the end - as JS. */
-static void setNumber(yyjson_mut_doc *doc, yyjson_mut_val *entry,
-                      const char *key, long value) {
+  json_t view;
 
-  yyjson_mut_val *field = yyjson_mut_obj_get(entry, key);
-
-  if (field != NULL)
-    yyjson_mut_set_sint(field, value);
-  else
-    yyjson_mut_obj_add_int(doc, entry, key, value);
+  memset(&view, 0, sizeof view);
+  view._doc = doc;
+  view._node = node;
+  view._key = "";
+  view._shared = 1;
+  return view;
 }
 
 static long numberOf(yyjson_mut_val *entry, const char *key) {
@@ -182,12 +186,6 @@ static void param(statement_t *s, json_t value) {
 
 static void paramText(statement_t *s, const char *text) {
   s->params.push(text);
-}
-
-/** A value of the record, copied into the statement's own document. */
-static void paramMut(statement_t *s, yyjson_mut_val *value) {
-  yyjson_mut_arr_append(s->params._node,
-                        yyjson_mut_val_mut_copy(s->params._doc, value));
 }
 
 /** One statement after another: the text and the parameters of `from`. */
@@ -1138,8 +1136,11 @@ static int backup(dml_t *self, yyjson_mut_val *entry, const char *table,
   if (answer != 0)
     return -1;
 
-  setNumber(self->record, entry, "b", 1);
-  setNumber(self->record, entry, "o", 0);
+  /* where they are, or added at the end - as JS assigns */
+  json_t step = viewOf(self->record, entry);
+
+  step.b = 1;
+  step.o = 0;
 
   if (save(self))
     return -1;
@@ -1201,7 +1202,9 @@ static int batches(dml_t *self, yyjson_mut_val *entry, long size,
     if (answer != 0)
       return -1;
 
-    setNumber(self->record, entry, "o", numberOf(entry, "o") + count);
+    json_t step = viewOf(self->record, entry);
+
+    step.o = numberOf(entry, "o") + count;
 
     if (self->driver->verbose)
       dbmSay(stdout, TEXT`[dml] ${self->name}: ${numberOf(entry, "o")} rows ${textOf(yyjson_mut_obj_get(entry, "a"))}d\n`);
@@ -1823,7 +1826,8 @@ int dml_t__runSqlWith(dml_t *self, const char *sql, json_t params,
     json_t revertParams = revert[1];
     yyjson_mut_arr_add_strcpy(self->record, args, revert[0].text());
     yyjson_mut_arr_append(args, isArray(revertParams)
-                                    ? copyIn(self->record, revertParams)
+                                    ? yyjson_mut_val_mut_copy(self->record,
+                                                              revertParams._node)
                                     : yyjson_mut_arr(self->record));
   }
 
@@ -1937,13 +1941,13 @@ static int revertInsert(dml_t *self, yyjson_mut_val *args) {
 static int revertRunSql(dml_t *self, yyjson_mut_val *args) {
 
   statement_t s;
-  yyjson_mut_val *params = yyjson_mut_arr_get(args, 1);
+  json_t params = viewOf(self->record, yyjson_mut_arr_get(args, 1));
 
   opened(&s);
   s.sql.put(textOf(yyjson_mut_arr_get(args, 0)));
 
-  for (size_t i = 0; i < yyjson_mut_arr_size(params); ++i)
-    paramMut(&s, yyjson_mut_arr_get(params, i));
+  for (value in params)
+    param(&s, value);
 
   int answer = alone(self, &s);
 
@@ -2216,11 +2220,12 @@ static int revert(dml_t *self) {
       if (copied) {
 
         yyjson_mut_val *gone = yyjson_mut_arr(self->record);
+        json_t step = viewOf(self->record, entry);
         dbm_text_t name = {0};
 
         yyjson_mut_arr_append(gone, yyjson_mut_val_mut_copy(self->record, yyjson_mut_arr_get(args, 1)));
         quoted(self, &name, textOf(yyjson_mut_arr_get(args, 1)));
-        setNumber(self->record, entry, "b", 2);
+        step.b = 2;
 
         answer = save(self) ||
                  plain(self, TEXT`DROP TABLE IF EXISTS ${name.text}`) ||
