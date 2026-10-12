@@ -116,27 +116,16 @@ static const char *holderOf(json_t row) {
 /* ------------------------------------------------------------------ */
 
 /**
- * `s[key] = value`, in its place if it is there, at the end if not. Not
- * `s.key = value`: `set` takes a key out and puts it back at the end, and
- * this row is compared with node's and read by node, field for field.
- */
-static void setField(json_t s, const char *key, json_value_t value) {
-
-  yyjson_mut_val *made = jsonValueNode(s._doc, value);
-
-  if (yyjson_mut_obj_get(s._node, key) != NULL)
-    yyjson_mut_obj_replace(s._node, yyjson_mut_str(s._doc, key), made);
-  else
-    yyjson_mut_obj_add(s._node, yyjson_mut_strcpy(s._doc, key), made);
-}
-
-/**
  * The row rewritten with this process's ID, the date and a fresh nonce, and
  * the fields `changes` names - a JSON object, `{"step":3}` - set. Every other
  * field stays as it was, those this does not know included: the row is
  * node's as much as this program's, and what node keeps in it to resume an
  * interrupted migration must survive a write from here. `release` writes the
  * ID node writes when it lets go, `0`.
+ *
+ * A field that is there is written where it is and a new one goes at the
+ * end, as node's assignments do: this row is compared with node's and read
+ * by node, field for field.
  */
 static char *rewritten(dbm_state_t *self, const char *value,
                        const char *changes, bool release) {
@@ -151,30 +140,35 @@ static char *rewritten(dbm_state_t *self, const char *value,
   isoDate(date, sizeof date);
   nonce(n);
 
+  /**
+   * A copy of the row's s, not `row.s = &was`: handed over only when it is
+   * an object, and a handover on one branch takes old's automatic release
+   * off every path - the other would want one by hand.
+   */
   json_t row = {s: was};
 
   if (strcmp(was.kind(), "object") != 0)
-    row.s = {};
+    row.s = &{};
 
   json_t s = row.s;
 
   /* node's first fields, in node's order, for a row that has none */
   if (strcmp(s.step.kind(), "nothing") == 0)
-    setField(s, "step", 0);
+    s.step = 0;
 
   if (strcmp(s.fin.kind(), "nothing") == 0)
-    setField(s, "fin", 0);
+    s.fin = 0;
 
   for (field in change)
-    setField(s, field.keyOf(), field);
+    s[field.keyOf()] = field;
 
   if (release)
-    setField(s, "ID", 0);
+    s.ID = 0;
   else
-    setField(s, "ID", self->id);
+    s.ID = self->id;
 
-  setField(s, "date", date);
-  setField(s, "n", n);
+  s.date = date;
+  s.n = n;
 
   return row.owned();
 }
