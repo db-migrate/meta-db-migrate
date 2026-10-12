@@ -59,26 +59,14 @@ static const char *textOf(yyjson_mut_val *value) {
 }
 
 /**
- * A field set where it is, or added at the end - as JS assigns. By hand,
- * because `object.key = value` takes a key that is there out and adds it at
- * the end, and node reads this document back and writes it again: its keys
- * stay where they are.
- */
-static void put(yyjson_mut_doc *doc, yyjson_mut_val *object, const char *key,
-                yyjson_mut_val *value) {
-  if (!yyjson_mut_obj_replace(object, yyjson_mut_str(doc, key), value))
-    yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, key), value);
-}
-
-/** The same on a json_t, with whatever value the place is given. */
-static void assign(json_t object, const char *key, json_value_t value) {
-  put(object._doc, object._node, key, jsonValueNode(object._doc, value));
-}
-
-/**
  * The jobs as they are stored, or `{"jobs":{}}`; nothing when reading failed.
- * Put right in yyjson, in the one document that is then handed over, rather
- * than a second one made for a row that is not what it should be.
+ *
+ * The root is chosen in yyjson, in the one document that is then handed over:
+ * a row that is not an object needs a root of its own, and a json_t has no
+ * way to replace the root of the document it holds - parsing it as one would
+ * make a second document only to throw the first away. Everything below the
+ * root is the json_t's: a `jobs` that is not an object is written over where
+ * it is, the empty object built in this document rather than copied in.
  */
 @owns static json_t readJobs(dbm_state_t *state, char **row) {
 
@@ -87,23 +75,21 @@ static void assign(json_t object, const char *key, json_value_t value) {
   if (dbmKvGet(state->db, state->table, DBM_JOBS, row))
     return meta_jsonFromMut(NULL);
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_doc *built = yyjson_mut_doc_new(NULL);
   yyjson_doc *read = *row != NULL ? yyjson_read(*row, strlen(*row), 0) : NULL;
   yyjson_mut_val *root = read != NULL && yyjson_is_obj(yyjson_doc_get_root(read))
-                             ? yyjson_val_mut_copy(doc, yyjson_doc_get_root(read))
-                             : NULL;
+                             ? yyjson_val_mut_copy(built, yyjson_doc_get_root(read))
+                             : yyjson_mut_obj(built);
 
   yyjson_doc_free(read);
+  yyjson_mut_doc_set_root(built, root);
 
-  if (root == NULL) {
-    root = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_val(doc, root, "jobs", yyjson_mut_obj(doc));
-  } else if (!yyjson_mut_is_obj(yyjson_mut_obj_get(root, "jobs"))) {
-    put(doc, root, "jobs", yyjson_mut_obj(doc));
-  }
+  json_t doc = meta_jsonFromMut(built);
 
-  yyjson_mut_doc_set_root(doc, root);
-  return meta_jsonFromMut(doc);
+  if (strcmp(doc.jobs.kind(), "object") != 0)
+    doc.jobs = &{};
+
+  return doc;
 }
 
 char *dbmJobsRead(dbm_state_t *state) {
@@ -148,7 +134,7 @@ static int change(dbm_state_t *state, changing_t mutate, void *context,
     char n[17];
 
     nonce(n);
-    assign(doc, "n", n);
+    doc.n = n;
 
     char *value = doc.owned();
 
@@ -210,40 +196,36 @@ static bool registering(json_t doc, void *context) {
 
   registering_t *it = context;
   json_t job = doc.jobs[it->name];
-  const char *const progress[] = {"step", "learned", "done", "rb"};
   char n[17];
 
   if (strcmp(job.kind(), "nothing") != 0 && strcmp(job.s.text(), "failed") != 0)
     return false;
 
-  /* a failed one keeps how far it got and its hash; its err goes - built in
-     yyjson where it is going, in the row's own document */
-  yyjson_mut_doc *into = doc._doc;
-  yyjson_mut_val *fresh = yyjson_mut_obj(into);
-
-  for (size_t i = 0; i < countof(progress); ++i) {
-    yyjson_mut_val *was = job[progress[i]]._node;
-    yyjson_mut_obj_add_val(into, fresh, progress[i],
-                           was != NULL ? yyjson_mut_val_mut_copy(into, was)
-                                       : yyjson_mut_sint(into, 0));
-  }
+  /**
+   * node's Object.assign({step, learned, done, rb}, job, {s, ...}): a failed
+   * one keeps how far it got and its hash, its err goes. Every field lands
+   * where Object.assign puts it - the progress first whatever order the job
+   * had it in, then the job's own, then the ones written here that it did
+   * not have - and the job keeps its place among the others when it is
+   * handed over.
+   */
+  json_t fresh = {step: 0, learned: 0, done: 0, rb: 0};
 
   for (field in job)
-    if (!(field.keyOf() in {"step", "learned", "done", "rb", "err"}))
-      yyjson_mut_obj_add(fresh, yyjson_mut_strcpy(into, field.keyOf()),
-                         yyjson_mut_val_mut_copy(into, field._node));
+    if (strcmp(field.keyOf(), "err") != 0)
+      fresh[field.keyOf()] = field;
 
   nonce(n);
-  put(into, fresh, "s", yyjson_mut_str(into, "queued"));
-  put(into, fresh, "blocking", yyjson_mut_bool(into, it->blocking));
-  put(into, fresh, "ID", yyjson_mut_sint(into, 0));
-  put(into, fresh, "n", yyjson_mut_strcpy(into, n));
+  fresh.s = "queued";
+  fresh.blocking = it->blocking;
+  fresh.ID = 0;
+  fresh.n = n;
 
   /* the scope it belongs to, as node 1.8.1 keeps it: none for the top level */
   if (it->scope != NULL && it->scope[0] != '\0')
-    put(into, fresh, "sc", yyjson_mut_strcpy(into, it->scope));
+    fresh.sc = it->scope;
 
-  put(into, doc.jobs._node, it->name, fresh);
+  doc.jobs[it->name] = &fresh;
   return true;
 }
 
@@ -290,14 +272,12 @@ int dbmJobsRemove(dbm_state_t *state, const char *name, char *why,
 
 static bool pausing(json_t doc, void *context) {
 
-  /* in the row's own document, where it is going */
-  yyjson_mut_val *pause = yyjson_mut_obj(doc._doc);
+  const char *id = context;
   char n[17];
 
+  /* over a pause that is there, where it is: a stale one is replaced */
   nonce(n);
-  yyjson_mut_obj_add_strcpy(doc._doc, pause, "ID", context);
-  yyjson_mut_obj_add_strcpy(doc._doc, pause, "n", n);
-  put(doc._doc, doc._node, "pause", pause);
+  doc.pause = &{ID: id, n: n};
   return true;
 }
 
@@ -520,9 +500,9 @@ static bool claiming(json_t doc, void *context) {
     if (available) {
       char n[17];
       nonce(n);
-      assign(job, "s", "running");
-      assign(job, "ID", it->id);
-      assign(job, "n", n);
+      job.s = "running";
+      job.ID = it->id;
+      job.n = n;
       dbmWrite(it->taken, it->room, TEXT`${names[i]}`);
       it->took = true;
       changed = true;
@@ -580,11 +560,11 @@ static bool updating(json_t doc, void *context) {
     if (strcmp(field.kind(), "null") == 0)
       job.remove(field.keyOf());
     else
-      assign(job, field.keyOf(), field);
+      job[field.keyOf()] = field;
 
   char n[17];
   nonce(n);
-  assign(job, "n", n);
+  job.n = n;
   return true;
 }
 
