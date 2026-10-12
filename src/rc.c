@@ -53,26 +53,23 @@ static char *slurp(const char *path) {
   return text;
 }
 
-/** `a` with `b` laid over it, objects merged, everything else replaced. */
-static void deepExtend(yyjson_mut_doc *doc, yyjson_mut_val *a,
-                       yyjson_mut_val *b) {
+/**
+ * `a` with `b` laid over it, objects merged, everything else replaced. A key
+ * `a` has already is written where it is, which is where node's assignment
+ * leaves it.
+ */
+static void deepExtend(json_t a, json_t b) {
 
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *key;
+  for (value in b) {
 
-  yyjson_mut_obj_iter_init(b, &walk);
+    const char *name = value.keyOf();
+    json_t there = a[name];
 
-  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    const char *name = yyjson_mut_get_str(key);
-    yyjson_mut_val *value = yyjson_mut_obj_iter_get_val(key);
-    yyjson_mut_val *there = yyjson_mut_obj_get(a, name);
-
-    if (there != NULL && yyjson_mut_is_obj(there) && yyjson_mut_is_obj(value))
-      deepExtend(doc, there, value);
+    if (strcmp(there.kind(), "object") == 0 &&
+        strcmp(value.kind(), "object") == 0)
+      deepExtend(there, value);
     else
-      yyjson_mut_obj_put(a, yyjson_mut_strcpy(doc, name),
-                         yyjson_mut_val_mut_copy(doc, value));
+      a[name] = value;
   }
 }
 
@@ -121,31 +118,30 @@ static char *trimmed(char *text) {
 }
 
 /** An INI value as the ini package reads one: true, false, null, or text. */
-static yyjson_mut_val *iniValue(yyjson_mut_doc *doc, char *value) {
+static void iniSet(json_t section, const char *key, char *value) {
 
   size_t length = strlen(value);
 
   if (length >= 2 && ((value[0] == '"' && value[length - 1] == '"') ||
                       (value[0] == '\'' && value[length - 1] == '\''))) {
     value[length - 1] = '\0';
-    return yyjson_mut_strcpy(doc, value + 1);
+    section[key] = (const char *)value + 1;
+  } else if (strcmp(value, "true") == 0) {
+    section[key] = true;
+  } else if (strcmp(value, "false") == 0) {
+    section[key] = false;
+  } else if (strcmp(value, "null") == 0) {
+    section[key] = NULL;
+  } else {
+    section[key] = (const char *)value;
   }
-
-  if (strcmp(value, "true") == 0)
-    return yyjson_mut_true(doc);
-  if (strcmp(value, "false") == 0)
-    return yyjson_mut_false(doc);
-  if (strcmp(value, "null") == 0)
-    return yyjson_mut_null(doc);
-
-  return yyjson_mut_strcpy(doc, value);
 }
 
 /** `key = value` lines, `[a.b]` sections, `;` and `#` comments. */
-static yyjson_mut_val *ini(yyjson_mut_doc *doc, char *text) {
+@owns static json_t ini(char *text) {
 
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_val *section = root;
+  json_t root = {};
+  json_t section = root;
 
   for (char *line = strtok(text, "\n"); line != NULL; line = strtok(NULL, "\n")) {
 
@@ -171,14 +167,10 @@ static yyjson_mut_val *ini(yyjson_mut_doc *doc, char *text) {
         if (dot != NULL)
           *dot = '\0';
 
-        yyjson_mut_val *next = yyjson_mut_obj_get(section, part);
+        if (strcmp(section[part].kind(), "object") != 0)
+          section[part] = &{};
 
-        if (next == NULL || !yyjson_mut_is_obj(next)) {
-          next = yyjson_mut_obj(doc);
-          yyjson_mut_obj_put(section, yyjson_mut_strcpy(doc, part), next);
-        }
-
-        section = next;
+        section = section[part];
         part = dot != NULL ? dot + 1 : NULL;
       }
 
@@ -186,25 +178,20 @@ static yyjson_mut_val *ini(yyjson_mut_doc *doc, char *text) {
     }
 
     char *equals = strchr(at, '=');
-    char *key = trimmed(at);
-    yyjson_mut_val *value;
 
     if (equals != NULL) {
       *equals = '\0';
-      key = trimmed(at);
-      value = iniValue(doc, trimmed(equals + 1));
+      iniSet(section, trimmed(at), trimmed(equals + 1));
     } else {
-      value = yyjson_mut_true(doc);
+      section[trimmed(at)] = true;
     }
-
-    yyjson_mut_obj_put(section, yyjson_mut_strcpy(doc, key), value);
   }
 
   return root;
 }
 
 /** One rc file over what is there, if it is there. */
-static void readFile(yyjson_mut_doc *doc, const char *path) {
+static void readFile(json_t merged, const char *path) {
 
   char *text = slurp(path);
 
@@ -212,32 +199,27 @@ static void readFile(yyjson_mut_doc *doc, const char *path) {
     return;
 
   char *start = text + strspn(text, " \t\r\n");
-  yyjson_mut_val *read = NULL;
 
   if (*start == '{') {
 
     withoutComments(start);
 
-    yyjson_doc *parsed = yyjson_read(start, strlen(start), 0);
+    json_t read = meta_toJSON(start);
 
-    if (parsed == NULL)
+    if (read._refused != NULL)
       dbmSay(stderr, TEXT`[WARN] ${path} is not JSON, it is left out\n`);
-    else
-      read = yyjson_val_mut_copy(doc, yyjson_doc_get_root(parsed));
-
-    yyjson_doc_free(parsed);
+    else if (strcmp(read.kind(), "object") == 0)
+      deepExtend(merged, read);
   } else {
-    read = ini(doc, start);
+    json_t read = ini(start);
+    deepExtend(merged, read);
   }
-
-  if (read != NULL && yyjson_mut_is_obj(read))
-    deepExtend(doc, yyjson_mut_doc_get_root(doc), read);
 
   free(text);
 }
 
 /** The variables db-migrate_<key>, any case, `__` a level down. */
-static void readEnvironment(yyjson_mut_doc *doc) {
+static void readEnvironment(json_t merged) {
 
   const char *prefix = "db-migrate_";
   size_t length = strlen(prefix);
@@ -257,7 +239,7 @@ static void readEnvironment(yyjson_mut_doc *doc) {
 
     *equals = '\0';
 
-    yyjson_mut_val *at = yyjson_mut_doc_get_root(doc);
+    json_t at = merged;
     char *part = copy;
 
     for (char *split = strstr(part, "__"); split != NULL;
@@ -265,33 +247,26 @@ static void readEnvironment(yyjson_mut_doc *doc) {
 
       *split = '\0';
 
-      yyjson_mut_val *next = yyjson_mut_obj_get(at, part);
+      if (strcmp(at[part].kind(), "object") != 0)
+        at[part] = &{};
 
-      if (next == NULL || !yyjson_mut_is_obj(next)) {
-        next = yyjson_mut_obj(doc);
-        yyjson_mut_obj_put(at, yyjson_mut_strcpy(doc, part), next);
-      }
-
-      at = next;
+      at = at[part];
       part = split + 2;
     }
 
-    yyjson_mut_obj_put(at, yyjson_mut_strcpy(doc, part),
-                       yyjson_mut_strcpy(doc, equals + 1));
+    at[part] = (const char *)equals + 1;
     free(copy);
   }
 }
 
 json_t dbmRunControl(void) {
 
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  json_t merged = {};
   const char *home = getenv("HOME");
   char path[4096];
 
-  yyjson_mut_doc_set_root(doc, yyjson_mut_obj(doc));
-
-  readFile(doc, "/etc/db-migrate/config");
-  readFile(doc, "/etc/db-migraterc");
+  readFile(merged, "/etc/db-migrate/config");
+  readFile(merged, "/etc/db-migraterc");
 
   if (home != NULL) {
     const char *const below[] = {"/.config/db-migrate/config",
@@ -300,7 +275,7 @@ json_t dbmRunControl(void) {
 
     for (size_t i = 0; i < countof(below); ++i) {
       dbmWrite(path, sizeof path, TEXT`${home}${below[i]}`);
-      readFile(doc, path);
+      readFile(merged, path);
     }
   }
 
@@ -316,7 +291,7 @@ json_t dbmRunControl(void) {
       struct stat info;
 
       if (stat(path, &info) == 0 && S_ISREG(info.st_mode)) {
-        readFile(doc, path);
+        readFile(merged, path);
         break;
       }
 
@@ -330,8 +305,8 @@ json_t dbmRunControl(void) {
   }
 
   if (getenv("config") != NULL)
-    readFile(doc, getenv("config"));
+    readFile(merged, getenv("config"));
 
-  readEnvironment(doc);
-  return meta_jsonFromMut(doc);
+  readEnvironment(merged);
+  return merged;
 }
