@@ -219,6 +219,11 @@ static long openSsh(json_t config, const char *host, long port, void **handle,
 
   ssh_tunnel_t *tunnel = calloc(1, sizeof *tunnel);
 
+  if (tunnel == NULL) {
+    dbmWrite(why, room, TEXT`out of memory opening the tunnel`);
+    return -1;
+  }
+
   dbmWrite(tunnel->dir, sizeof tunnel->dir,
            TEXT`${tmp != NULL && tmp[0] != '\0' ? tmp : "/tmp"}/dbm-ssh-XXXXXX`);
 
