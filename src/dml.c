@@ -2551,47 +2551,36 @@ int dbmDownDml(driver_t *driver, dbm_state_t *state,
 
 /**
  * The purges registered, with their age and what applies to them -
- * `{mark: {t, key, age, releases, drop}}` - those due only.
+ * `{mark: {t, key, age, releases, drop}}` - those due only. The caller's,
+ * which `@owns` says.
  */
-static yyjson_mut_doc *duePurges(dml_t *self) {
+@owns static json_t duePurges(dml_t *self) {
 
   dbm_state_t *state = self->state;
-  yyjson_mut_doc *due = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(due);
+  json_t due = {};
   char *row = NULL;
-
-  yyjson_mut_doc_set_root(due, root);
 
   if (dbmKvGet(state->db, state->table, PURGES, &row) || row == NULL)
     return due;
 
-  yyjson_mut_doc *registry = dbmRecordFrom(NULL);
-  yyjson_doc *read = yyjson_read(row, strlen(row), 0);
+  json_t registry = meta_toJSON(row);
 
   free(row);
-  yyjson_mut_doc_set_root(registry, read != NULL
-                                        ? yyjson_val_mut_copy(registry, yyjson_doc_get_root(read))
-                                        : yyjson_mut_obj(registry));
-  yyjson_doc_free(read);
 
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *mark;
+  /* a row that holds no object holds no purges */
+  if (!isObject(registry))
+    return due;
 
-  yyjson_mut_obj_iter_init(rootOf(registry), &walk);
+  for (entry in registry) {
 
-  while (!self->failed && (mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(mark);
-    yyjson_mut_val *r = yyjson_mut_obj_get(entry, "r");
+    json_t r = entry.r;
     long age = dbmReleaseAge(state, state->releaseCurrent,
-                             r != NULL && yyjson_mut_is_str(r)
-                                 ? yyjson_mut_get_str(r)
-                                 : NULL);
+                             isText(r) ? r.text() : NULL);
     long releases;
     char drop[8];
 
-    if (dbmReleaseSettings(state, yyjson_mut_obj_get(entry, "o"), &releases,
-                           drop, self->error, sizeof self->error)) {
+    if (dbmReleaseSettings(state, entry.o._node, &releases, drop, self->error,
+                           sizeof self->error)) {
       self->failed = true;
       break;
     }
@@ -2599,15 +2588,16 @@ static yyjson_mut_doc *duePurges(dml_t *self) {
     if (age < releases)
       continue;
 
-    yyjson_mut_val *item = yyjson_mut_val_mut_copy(due, entry);
+    /* copied: `&` would take the registry's pool along, mid-walk */
+    due[entry.keyOf()] = entry;
 
-    yyjson_mut_obj_put(item, yyjson_mut_str(due, "age"), yyjson_mut_sint(due, age));
-    yyjson_mut_obj_put(item, yyjson_mut_str(due, "releases"), yyjson_mut_sint(due, releases));
-    yyjson_mut_obj_put(item, yyjson_mut_strcpy(due, "drop"), yyjson_mut_strcpy(due, drop));
-    yyjson_mut_obj_add(root, yyjson_mut_strcpy(due, yyjson_mut_get_str(mark)), item);
+    json_t item = due[entry.keyOf()];
+
+    item.age = age;
+    item.releases = releases;
+    item.drop = drop;
   }
 
-  yyjson_mut_doc_free(registry);
   return due;
 }
 
@@ -2639,24 +2629,21 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
 
   self.record = dbmRecordFrom(NULL);
 
-  yyjson_mut_doc *due = duePurges(&self);
-  yyjson_mut_val *marks = yyjson_mut_obj(due);
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *mark;
+  json_t due = duePurges(&self);
+  json_t marks = {};
 
-  yyjson_mut_obj_iter_init(rootOf(due), &walk);
+  for (entry in due) {
 
-  while (!self.failed && (mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
+    if (self.failed)
+      break;
 
-    const char *text = yyjson_mut_get_str(mark);
-    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(mark);
-    const char *table = textOf(yyjson_mut_obj_get(entry, "t"));
+    const char *text = entry.keyOf();
+    const char *table = entry.t.text();
 
-    if (strcmp(textOf(yyjson_mut_obj_get(entry, "drop")), "auto") != 0)
+    if (strcmp(entry.drop.text(), "auto") != 0)
       continue;
 
-    yyjson_mut_obj_add(marks, yyjson_mut_strcpy(due, text),
-                       yyjson_mut_strcpy(due, table));
+    marks[text] = table;
     dbmSay(stdout, TEXT`[INFO] [release] purging the rows of "${table}" deleted in soft mode by ${text + 5}\n`);
 
     if (self.dry)
@@ -2664,7 +2651,6 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
 
     statement_t condition;
     statement_t change;
-    yyjson_mut_val *key = yyjson_mut_val_mut_copy(self.record, yyjson_mut_obj_get(entry, "key"));
 
     opened(&condition);
     markedBy(&self, &condition, text, false);
@@ -2672,14 +2658,14 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
     change.sql.put("DELETE FROM ");
     quoted(&self, &change.sql, table);
     change.sql.put(" WHERE ");
-    untilDone(&self, table, key, &condition, BATCH, &change);
+    untilDone(&self, table, entry["key"]._node, &condition, BATCH, &change);
     closed(&change);
     closed(&condition);
   }
 
   /* nothing to purge any more, and the release can not be reverted */
-  if (!self.failed && !self.dry && yyjson_mut_obj_size(marks) > 0 &&
-      changeState(&self, PURGES, forgettingMarks, marks) == 0) {
+  if (!self.failed && !self.dry && marks.count() > 0 &&
+      changeState(&self, PURGES, forgettingMarks, marks._node) == 0) {
 
     char *row = NULL;
 
@@ -2687,23 +2673,12 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
       failedState(&self);
     } else {
 
+      /* yyjson's, freed by hand: a step goes in with `=`, never `&` */
       yyjson_mut_doc *record = dbmRecordFrom(row);
-      yyjson_mut_val *steps = yyjson_mut_obj_get(rootOf(record), "s");
+      json_t steps = viewOf(record, yyjson_mut_obj_get(rootOf(record), "s"));
 
-      yyjson_mut_obj_iter_init(marks, &walk);
-
-      while ((mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-        yyjson_mut_val *purged = yyjson_mut_obj(record);
-        yyjson_mut_val *args = yyjson_mut_arr(record);
-
-        yyjson_mut_arr_add_strcpy(record, args, textOf(yyjson_mut_obj_iter_get_val(mark)));
-        yyjson_mut_obj_add_int(record, purged, "t", 3);
-        yyjson_mut_obj_add_str(record, purged, "a", "purge");
-        yyjson_mut_obj_add_val(record, purged, "c", args);
-        yyjson_mut_obj_add_int(record, purged, "n", 0);
-        yyjson_mut_arr_append(steps, purged);
-      }
+      for (table in marks)
+        steps.push({t: 3, a: "purge", c: [table.text()], n: 0});
 
       char *text = yyjson_mut_write(record, 0, NULL);
       int answer = text == NULL ||
@@ -2718,8 +2693,6 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
         failedState(&self);
     }
   }
-
-  yyjson_mut_doc_free(due);
 
   /* the backups of the migrations final now */
   if (!self.failed) {
@@ -2749,30 +2722,23 @@ void dbmDmlWarn(driver_t *driver, dbm_state_t *state) {
 
   self.record = dbmRecordFrom(NULL);
 
-  yyjson_mut_doc *due = duePurges(&self);
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *key;
+  json_t due = duePurges(&self);
 
-  yyjson_mut_obj_iter_init(rootOf(due), &walk);
+  for (entry in due) {
 
-  while ((key = yyjson_mut_obj_iter_next(&walk)) != NULL) {
-
-    const char *mark = yyjson_mut_get_str(key);
-    yyjson_mut_val *entry = yyjson_mut_obj_iter_get_val(key);
+    const char *mark = entry.keyOf();
     char migration[300];
     const char *hash = strrchr(mark, '#');
 
-    if (strcmp(textOf(yyjson_mut_obj_get(entry, "drop")), "manual") != 0)
+    if (strcmp(entry.drop.text(), "manual") != 0)
       continue;
 
     dbmWrite(migration, hash != NULL && (size_t)(hash - mark - 5) + 1 < sizeof migration
                             ? (size_t)(hash - mark - 5) + 1
                             : sizeof migration,
              TEXT`${mark + 5}`);
-    dbmSay(stderr, TEXT`[WARN] [release] the rows of "${textOf(yyjson_mut_obj_get(entry, "t"))}" deleted in soft mode by ${mark + 5} are due for purging, deleted ${numberOf(entry, "age")} releases ago. Purge them in a dml migration with db.purge("${textOf(yyjson_mut_obj_get(entry, "t"))}", "${migration}").\n`);
+    dbmSay(stderr, TEXT`[WARN] [release] the rows of "${entry.t.text()}" deleted in soft mode by ${mark + 5} are due for purging, deleted ${entry.age.number()} releases ago. Purge them in a dml migration with db.purge("${entry.t.text()}", "${migration}").\n`);
   }
-
-  yyjson_mut_doc_free(due);
 
   json_t groups = backupsOf(&self, false);
 
