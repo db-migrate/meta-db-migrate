@@ -163,29 +163,13 @@ static bool isObject(json_t value) {
 }
 
 /**
- * `parent[key] = value`, a copy, in place of whatever was there and where it
- * was - an absent value is written as null.
- *
- * Not `parent[key] = value` itself: json_t's set takes a key that is there
- * out and adds it again at the end, and the schema and the record are written
- * out as they are and read back by node, so where a key stands is part of
- * what is written. yyjson's put replaces in place, and json_t has nothing
- * that does.
- */
-static void put(json_t parent, const char *key, json_t value) {
-
-  if (!isObject(parent))
-    return;
-
-  yyjson_mut_obj_put(parent._node, yyjson_mut_strcpy(parent._doc, key),
-                     value._node != NULL
-                         ? yyjson_mut_val_mut_copy(parent._doc, value._node)
-                         : yyjson_mut_null(parent._doc));
-}
-
-/**
- * `parent[key] = made`, in place as put is, for a value made in parent's own
- * document by objectIn or arrayIn: it is linked rather than copied.
+ * `parent[key] = made`, for a value made in parent's own document by objectIn
+ * or arrayIn: it is linked rather than copied, where the key stands if it is
+ * there. Not `parent[key] = &made`, which is what that is in json_t: `&` is
+ * kept to targets released through json_t, because the pools it takes in are
+ * listed on the target's note and freed by json_t's release - and the schema
+ * and the record are freed by their owners with yyjson's, so a note made for
+ * either would be one nobody frees.
  */
 static void place(json_t parent, const char *key, json_t made) {
   yyjson_mut_obj_put(parent._node, yyjson_mut_strcpy(parent._doc, key),
@@ -440,7 +424,7 @@ static void learnColumnKeys(schema_t *self, const char *table, json_t spec) {
       entry.m = mapping;
     }
 
-    put(keys, foreign.name.text(), entry);
+    place(keys, foreign.name.text(), entry);
   }
 }
 
@@ -457,7 +441,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
   match (action) {
 
   case ACTION_CREATE_TABLE: {
-    put(c, t, step->spec);
+    c[t] = step->spec;
     learnColumnKeys(self, t, step->spec);
 
     const char *args[] = {t};
@@ -485,7 +469,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
       json_t held = from[t];
 
       if (!absent(held)) {
-        put(child(kept, parts[at]), t, held);
+        child(kept, parts[at])[t] = held;
         from.remove(t);
       }
     }
@@ -511,7 +495,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
       bool own = at == 0 && !absent(held) && strcmp(held.to.text(), n) == 0;
 
       if (!absent(held) && !own) {
-        put(marks, n, held);
+        marks[n] = held;
         marks.remove(t);
       }
     }
@@ -522,7 +506,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
       json_t held = part[t];
 
       if (!absent(held)) {
-        put(part, n, held);
+        part[n] = held;
         part.remove(t);
       }
     }
@@ -537,7 +521,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (needTable(self, t))
       return -1;
 
-    put(columnsOf(tableIn(self, t)), step->name, step->spec);
+    columnsOf(tableIn(self, t))[step->name] = step->spec;
 
     const char *args[] = {t, step->name};
     record(self, 0, ACTION_REMOVE_COLUMN, args, 2, NULL);
@@ -586,16 +570,15 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     if (notNull && !self->unlearn && strcmp(strategy, "delay") == 0) {
 
-      put(was, step->name, column);
+      was[step->name] = column;
       const char *args[] = {t, step->other, step->name};
       record(self, 0, ACTION_RENAME_COLUMN, args, 3, NULL);
     } else if (!self->unlearn) {
 
-      put(was, step->name, column);
+      was[step->name] = column;
 
       if (notNull)
-        put(was[step->name], "defaultValue",
-            step->options.passthrough.defaultValue);
+        was[step->name].defaultValue = step->options.passthrough.defaultValue;
 
       const char *args[] = {t, step->name};
       record(self, 1, ACTION_ADD_COLUMN, args, 2, step->options._node);
@@ -612,7 +595,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     json_t columns = columnsOf(tableIn(self, t));
 
-    put(columns, step->other, columns[step->name]);
+    columns[step->other] = columns[step->name];
     columns.remove(step->name);
     const char *args[] = {t, step->other, step->name};
     record(self, 0, ACTION_RENAME_COLUMN, args, 3, NULL);
@@ -629,12 +612,12 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
     /* undone: exactly the column as it was kept, not merged into the new */
     if (self->unlearn) {
-      put(columns, step->name, step->spec);
+      columns[step->name] = step->spec;
       return 0;
     }
 
     /* the column as it was, which node meant to keep and did not */
-    put(child(child(kept, "c"), t), step->name, column);
+    child(child(kept, "c"), t)[step->name] = column;
 
     if (!isObject(column)) {
       json_t spelled = objectIn(columns);
@@ -644,7 +627,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     }
 
     for (value in step->spec)
-      put(column, value.keyOf(), value);
+      column[value.keyOf()] = value;
 
     const char *args[] = {t, step->name};
     record(self, 1, ACTION_CHANGE_COLUMN, args, 2, NULL);
@@ -687,7 +670,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (absent(index))
       return unknownIndex(self, t, step->name);
 
-    put(child(child(kept, "i"), t), step->name, index);
+    child(child(kept, "i"), t)[step->name] = index;
     i[t].remove(step->name);
     const char *args[] = {t, step->name};
     record(self, 1, ACTION_ADD_INDEX, args, 2, NULL);
@@ -735,7 +718,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     if (absent(key))
       return unknownForeignKey(self, t, step->name, false);
 
-    put(child(child(kept, "f"), t), step->name, key);
+    child(child(kept, "f"), t)[step->name] = key;
     f[t].remove(step->name);
 
     /* node records nothing here, and so could not put the key back */
@@ -762,7 +745,7 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
     args.push(holder[key]);
 
     if (!step->spec.isNothing()) {
-      put(holder, key, step->spec);
+      holder[key] = step->spec;
     } else {
       holder.remove(key);
       if (column != NULL && holder.count() == 0)
@@ -1200,13 +1183,13 @@ int schema_t__deprecateColumnWith(schema_t *self, const char *table,
     return -1;
 
   /* the application stops writing it: NOT NULL relaxed, by the whole spec,
-     as MySQL changes a column - where it stood, which set would not keep */
+     as MySQL changes a column - written where notNull stands, as a key that
+     is there is */
   if (isObject(spec) && spec.notNull.truth()) {
 
     json_t relaxed = {spec: spec};
 
-    yyjson_mut_obj_put(relaxed.spec._node, yyjson_mut_str(relaxed._doc, "notNull"),
-                       yyjson_mut_false(relaxed._doc));
+    relaxed.spec.notNull = false;
 
     if (self->changeColumn(table, column, relaxed.spec) != 0)
       return -1;
