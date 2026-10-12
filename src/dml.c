@@ -609,8 +609,7 @@ static int between(dml_t *self) {
   return 0;
 }
 
-typedef bool (*mutation_t)(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                           void *context);
+typedef bool (*mutation_t)(json_t registry, void *context);
 
 /**
  * A row of the state changed by compare and swap, tried again until nobody
@@ -631,23 +630,25 @@ static int changeState(dml_t *self, const char *key, mutation_t mutate,
     if (dbmKvGet(state->db, state->table, key, &row))
       return failedState(self);
 
-    yyjson_mut_doc *doc = dbmRecordFrom(NULL);
-    yyjson_doc *read = row != NULL ? yyjson_read(row, strlen(row), 0) : NULL;
+    json_t registry = meta_toJSON(row != NULL ? row : "{}");
 
-    /* the record's parts are not this row's: an object, as it was */
-    yyjson_mut_doc_set_root(doc, read != NULL && yyjson_is_obj(yyjson_doc_get_root(read))
-                                     ? yyjson_val_mut_copy(doc, yyjson_doc_get_root(read))
-                                     : yyjson_mut_obj(doc));
-    yyjson_doc_free(read);
+    /* node's JSON.parse throws on it, and writing over it loses what it held */
+    if (!isObject(registry)) {
+      free(row);
+      return fail(self, TEXT`[release] ${key} holds no JSON object, it is left as it is`);
+    }
 
-    if (!mutate(doc, rootOf(doc), context)) {
-      yyjson_mut_doc_free(doc);
+    /*
+     * A view, because meta can not see into `mutate` and would take the
+     * release off a document handed to it. What the mutations write with
+     * `&{...}` is built in this document, so the view adopts no pool.
+     */
+    if (!mutate(viewOf(registry._doc, registry._node), context)) {
       free(row);
       return 0;
     }
 
-    char *next = yyjson_mut_write(doc, 0, NULL);
-    yyjson_mut_doc_free(doc);
+    char *next = registry.owned();
 
     if (row == NULL)
       dbmKvInsert(state->db, state->table, key, next);
@@ -670,36 +671,19 @@ static int changeState(dml_t *self, const char *key, mutation_t mutate,
   return fail(self, TEXT`[release] could not change ${key}, too much contention`);
 }
 
-/** A key set to a value, where it is if it is there - as JS assigns. */
-static void assign(yyjson_mut_doc *doc, yyjson_mut_val *object,
-                   const char *key, yyjson_mut_val *value) {
-
-  if (!yyjson_mut_obj_replace(object, yyjson_mut_str(doc, key), value))
-    yyjson_mut_obj_add(object, yyjson_mut_strcpy(doc, key), value);
-}
-
 typedef struct {
   dml_t *self;
   const char *backup;
   const char *table;
 } backup_change_t;
 
-static bool registeringBackup(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                              void *context) {
+/* a backup registered again keeps its place, as JS assigns */
+static bool registeringBackup(json_t registry, void *context) {
 
   backup_change_t *change = context;
-  const char *release = change->self->state->releaseLabel;
-  yyjson_mut_val *entry = yyjson_mut_obj(doc);
 
-  yyjson_mut_obj_add_strcpy(doc, entry, "m", change->self->name);
-  yyjson_mut_obj_add_strcpy(doc, entry, "t", change->table);
-
-  if (release != NULL)
-    yyjson_mut_obj_add_strcpy(doc, entry, "r", release);
-  else
-    yyjson_mut_obj_add_null(doc, entry, "r");
-
-  assign(doc, value, change->backup, entry);
+  registry[change->backup] = &{m: change->self->name, t: change->table,
+                               r: change->self->state->releaseLabel};
   return true;
 }
 
@@ -708,25 +692,23 @@ static int registerBackup(dml_t *self, const char *backup, const char *table) {
   return changeState(self, BACKUPS, registeringBackup, &change);
 }
 
-static bool forgettingBackups(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                              void *context) {
+static bool forgettingBackups(json_t registry, void *context) {
 
-  yyjson_mut_val *backups = context;
+  json_t backups = viewOf(NULL, context);
   bool any = false;
 
-  (void)doc;
-
-  for (size_t i = 0; i < yyjson_mut_arr_size(backups); ++i)
-    any = yyjson_mut_obj_remove_key(
-              value, textOf(yyjson_mut_arr_get(backups, i))) != NULL ||
-          any;
+  for (backup in backups)
+    any = registry.remove(backup.text()) || any;
 
   return any;
 }
 
-/** `backups`: an array of their names. */
-static int forgetBackups(dml_t *self, yyjson_mut_val *backups) {
-  return changeState(self, BACKUPS, forgettingBackups, backups);
+/**
+ * `backups`: an array of their names. Handed on as its node, because meta
+ * takes the release off a value whose address goes where it can not see.
+ */
+static int forgetBackups(dml_t *self, json_t backups) {
+  return changeState(self, BACKUPS, forgettingBackups, backups._node);
 }
 
 /** { releases, drop } as node checks them, into `into`. */
@@ -745,34 +727,27 @@ typedef struct {
   dml_t *self;
   const char *mark;
   const char *table;
-  yyjson_mut_val *key;
+  json_t key;
   json_t purge;
 } purge_change_t;
 
-static bool schedulingPurge(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                            void *context) {
+/* a mark scheduled again keeps its place, as JS assigns */
+static bool schedulingPurge(json_t registry, void *context) {
 
   purge_change_t *change = context;
-  const char *release = change->self->state->releaseLabel;
-  yyjson_mut_val *entry = yyjson_mut_obj(doc);
-  yyjson_mut_val *options = yyjson_mut_obj(doc);
 
-  yyjson_mut_obj_add_strcpy(doc, entry, "t", change->table);
-  yyjson_mut_obj_add_val(doc, entry, "key",
-                         yyjson_mut_val_mut_copy(doc, change->key));
+  registry[change->mark] = &{t: change->table, key: change->key,
+                             r: change->self->state->releaseLabel, o: {}};
 
-  if (release != NULL)
-    yyjson_mut_obj_add_strcpy(doc, entry, "r", release);
-  else
-    yyjson_mut_obj_add_null(doc, entry, "r");
+  json_t entry = registry[change->mark];
 
   if (isObject(change->purge))
-    purgeOptions(change->self, change->purge, doc, options);
+    purgeOptions(change->self, change->purge, entry._doc, entry.o._node);
 
-  if (yyjson_mut_obj_size(options) > 0)
-    yyjson_mut_obj_add_val(doc, entry, "o", options);
+  /* node writes the options only when there are any */
+  if (entry.o.count() == 0)
+    entry.remove("o");
 
-  assign(doc, value, change->mark, entry);
   return true;
 }
 
@@ -782,16 +757,15 @@ typedef struct {
   bool exact;
 } purges_gone_t;
 
-static bool forgettingPurges(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                             void *context) {
+static bool forgettingPurges(json_t registry, void *context) {
 
   purges_gone_t *gone = context;
   yyjson_mut_obj_iter walk;
   yyjson_mut_val *mark;
   bool any = false;
 
-  (void)doc;
-  yyjson_mut_obj_iter_init(value, &walk);
+  /* taken out while it is walked, which for-in can not do */
+  yyjson_mut_obj_iter_init(registry._node, &walk);
 
   while ((mark = yyjson_mut_obj_iter_next(&walk)) != NULL) {
 
@@ -942,8 +916,7 @@ static void finalSteps(yyjson_mut_doc *doc, yyjson_mut_val *steps,
  * The backups of a migration dropped, which can not be reverted afterwards:
  * its steps are recorded as irreversible first.
  */
-static int dropGroup(dml_t *self, const char *migration,
-                     yyjson_mut_val *backups) {
+static int dropGroup(dml_t *self, const char *migration, json_t backups) {
 
   dbm_state_t *state = self->state;
 
@@ -953,7 +926,7 @@ static int dropGroup(dml_t *self, const char *migration,
     return 0;
 
   if (strcmp(migration, self->name) == 0) {
-    finalSteps(self->record, stepsOf(self), backups);
+    finalSteps(self->record, stepsOf(self), backups._node);
     if (save(self))
       return -1;
   } else {
@@ -968,7 +941,8 @@ static int dropGroup(dml_t *self, const char *migration,
       yyjson_mut_doc *record = dbmRecordFrom(row);
 
       free(row);
-      finalSteps(record, yyjson_mut_obj_get(rootOf(record), "s"), backups);
+      finalSteps(record, yyjson_mut_obj_get(rootOf(record), "s"),
+                 backups._node);
 
       char *text = yyjson_mut_write(record, 0, NULL);
       int answer = text == NULL ||
@@ -982,10 +956,10 @@ static int dropGroup(dml_t *self, const char *migration,
     }
   }
 
-  for (size_t i = 0; i < yyjson_mut_arr_size(backups); ++i) {
+  for (backup in backups) {
 
     dbm_text_t name = {0};
-    quoted(self, &name, textOf(yyjson_mut_arr_get(backups, i)));
+    quoted(self, &name, backup.text());
 
     int answer = plain(self, TEXT`DROP TABLE IF EXISTS ${name.text}`);
 
@@ -1637,7 +1611,8 @@ static int softDelete(dml_t *self, const char *table, json_t where,
   } else if (answer == 0) {
 
     if (purge._node != NULL) {
-      purge_change_t scheduled = {self, mark, table, key, purge};
+      purge_change_t scheduled = {self, mark, table,
+                                   viewOf(self->record, key), purge};
       answer = changeState(self, PURGES, schedulingPurge, &scheduled);
     }
 
@@ -1884,7 +1859,7 @@ int dml_t__dropBackups(dml_t *self, const char *migration) {
     const char *m = group.keyOf();
 
     if (migration == NULL || strcmp(m, migration) == 0)
-      answer = dropGroup(self, m, group.backups._node);
+      answer = dropGroup(self, m, group.backups);
 
     if (answer != 0)
       break;
@@ -2219,17 +2194,16 @@ static int revert(dml_t *self) {
 
       if (copied) {
 
-        yyjson_mut_val *gone = yyjson_mut_arr(self->record);
+        const char *backup = textOf(yyjson_mut_arr_get(args, 1));
         json_t step = viewOf(self->record, entry);
         dbm_text_t name = {0};
 
-        yyjson_mut_arr_append(gone, yyjson_mut_val_mut_copy(self->record, yyjson_mut_arr_get(args, 1)));
-        quoted(self, &name, textOf(yyjson_mut_arr_get(args, 1)));
+        quoted(self, &name, backup);
         step.b = 2;
 
         answer = save(self) ||
                  plain(self, TEXT`DROP TABLE IF EXISTS ${name.text}`) ||
-                 forgetBackups(self, gone);
+                 forgetBackups(self, [backup]);
         name.release();
 
         if (answer != 0)
@@ -2637,18 +2611,12 @@ static yyjson_mut_doc *duePurges(dml_t *self) {
   return due;
 }
 
-static bool forgettingMarks(yyjson_mut_doc *doc, yyjson_mut_val *value,
-                            void *context) {
+static bool forgettingMarks(json_t registry, void *context) {
 
-  yyjson_mut_val *marks = context;
-  yyjson_mut_obj_iter walk;
-  yyjson_mut_val *mark;
+  json_t marks = viewOf(NULL, context);
 
-  (void)doc;
-  yyjson_mut_obj_iter_init(marks, &walk);
-
-  while ((mark = yyjson_mut_obj_iter_next(&walk)) != NULL)
-    yyjson_mut_obj_remove_key(value, yyjson_mut_get_str(mark));
+  for (mark in marks)
+    registry.remove(mark.keyOf());
 
   return true;
 }
@@ -2760,7 +2728,7 @@ int dbmDmlReleaseStart(driver_t *driver, dbm_state_t *state, const char *label,
 
     for (group in groups)
       if (!self.failed && strcmp(group.drop.text(), "auto") == 0)
-        dropGroup(&self, group.keyOf(), group.backups._node);
+        dropGroup(&self, group.keyOf(), group.backups);
   }
 
   yyjson_mut_doc_free(self.record);
