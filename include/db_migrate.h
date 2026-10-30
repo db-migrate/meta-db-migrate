@@ -46,7 +46,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define DBM_VERSION "0.6.1"
+#define DBM_VERSION "0.6.2"
 
 /**
  * One number for what this library hands across to a program built against

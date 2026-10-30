@@ -1,3 +1,30 @@
+## 0.6.2 (2026-10-30)
+
+The same db-migrate, written for meta's `json_t` as it is since `90db752`;
+the ABI stays 1.
+
+### Bug Fixes
+
+* **walker:** the names read before a failure are released too, and those
+  replaced are released before they are
+* **dml:** the default options of an instruction are released after it
+* **seed:** the document saying an insert has no values is released
+* **launcher:** the rc document is released when main returns
+* **ssh:** a tunnel that gets no memory fails like the other paths
+
+### Build
+
+* **meta:** built and tested with meta `7fda349` (`wxone/meta:7fda349`)
+  rather than `51d441c`: the documents are `json_t` throughout, read by key
+  and subscript and written with `set` and `&`, where the type's own fields
+  are `_node` and `_refused` since `90db752`. A program on that meta that
+  links `libdbmigrate-core.a` and its driver links these, which 0.6.1, built
+  before, did not match
+* meta from `b83c159` on hides its runtime's names in the object that links
+  it, and the launcher's drivers, shared objects reaching into the launcher,
+  do not link against an installed meta built that way; not yet followed,
+  see README
+
 ## 0.6.1 (2026-10-11)
 
 What node db-migrate 1.8.1 fixed, followed; the ABI stays 1.

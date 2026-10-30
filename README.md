@@ -485,8 +485,15 @@ databases (`test/database.json`) are started by the commands at the top of
 come from meta's own headers, or from the source itself where it includes a
 library's header directly: the yaml plugin says
 `#pragma meta needs "yaml-0.1"` beside `#include <yaml.h>`. build.sh
-itself knows none of it. This needs meta `ed6f263` or newer
-(`meta --version`).
+itself knows none of it. This needs meta `90db752` or newer
+(`meta --version`), whose `json_t` keeps its own fields as `_node` and
+`_refused`. From `b83c159` on, meta hides its runtime's names in the object
+that links it (`META_INTERNAL`), and the launcher's drivers - shared objects
+that reach the runtime inside the launcher - no longer link against an
+installed meta, whose `libmeta_runtime.a` is built that way. Until that is
+followed here, CI and the release use `wxone/meta:7fda349`. A program that
+links the archives (`libdbmigrate-core.a` and a driver) into itself is not
+affected: there the runtime is one copy in one object, hidden or not.
 
 ## CI and releases
 
@@ -496,7 +503,7 @@ This repository only uses it. meta bakes that path into itself, so it has to
 stay at `/opt/meta`:
 
 ```sh
-docker create --name meta wxone/meta:51d441c
+docker create --name meta wxone/meta:7fda349
 sudo docker cp meta:/opt/meta /opt/meta && docker rm meta
 META_ROOT=/opt/meta ./build.sh
 ```
