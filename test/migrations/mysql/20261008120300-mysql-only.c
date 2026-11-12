@@ -19,6 +19,7 @@ static int up(migrator_t *db) {
     },
     engine: "InnoDB",
     charset: "utf8mb4",
+    collate: "utf8mb4_bin",
   });
 
   db->changeColumn("pets", "species", {type: "string", length: 32,

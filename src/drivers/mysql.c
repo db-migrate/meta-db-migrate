@@ -444,7 +444,7 @@ static int myTableOptions(driver_t *self, dbm_text_t *out, const char *table,
 
   (void)table;
 
-  const char *words[] = {engine, rowFormat, collate, charset};
+  const char *words[] = {engine, rowFormat, charset, collate};
 
   /* words, not expressions: anything else is not an option of a table */
   for (size_t i = 0; i < countof(words); ++i)
@@ -462,14 +462,16 @@ static int myTableOptions(driver_t *self, dbm_text_t *out, const char *table,
     out->put(rowFormat);
   }
 
-  if (collate[0] != '\0') {
-    out->put(" COLLATE ");
-    out->put(collate);
-  }
-
+  /* the character set first: after the collation, older servers reset the
+     collation to the character set's default */
   if (charset[0] != '\0') {
     out->put(" CHARACTER SET ");
     out->put(charset);
+  }
+
+  if (collate[0] != '\0') {
+    out->put(" COLLATE ");
+    out->put(collate);
   }
 
   return 0;
