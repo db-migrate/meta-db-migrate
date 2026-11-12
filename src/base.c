@@ -449,7 +449,32 @@ const char *dbmBaseMapDataType(driver_t *self, const char *type) {
   }
 }
 
-/** What a type name becomes when nobody recognised it: the name, shouted. */
+/**
+ * The end of a quoted part starting at `at` - its closing quote, `''` being
+ * a quote inside it - or NULL when it does not close, or holds a backslash,
+ * which MySQL would read as escaping the quote after it.
+ */
+static const char *quotedEnd(const char *at) {
+
+  for (const char *end = at + 1; *end != '\0'; ++end) {
+
+    if (*end == '\\')
+      return NULL;
+
+    if (*end == '\'' && end[1] == '\'')
+      ++end;
+    else if (*end == '\'')
+      return end;
+  }
+
+  return NULL;
+}
+
+/**
+ * What a type name becomes when nobody recognised it: the name, shouted -
+ * but for its quoted parts, the values of an enum('dog', 'Cat'), which stay
+ * as they are, as db-migrate-base 2.5.1 keeps them.
+ */
 static void putType(driver_t *self, dbm_text_t *out, const char *type) {
 
   const char *mapped = self->mapDataType(self, type);
@@ -459,8 +484,17 @@ static void putType(driver_t *self, dbm_text_t *out, const char *type) {
     return;
   }
 
-  /* only letters, digits, spaces and parentheses - a type is not a statement */
+  /* only letters, digits, spaces, parentheses and closed quoted parts - a
+     type is not a statement */
   for (const char *at = type; *at != '\0'; ++at) {
+
+    const char *end = *at == '\'' ? quotedEnd(at) : NULL;
+
+    if (end != NULL) {
+      out->putn(at, (size_t)(end - at + 1));
+      at = end;
+      continue;
+    }
 
     char upper = (char)toupper((unsigned char)*at);
 

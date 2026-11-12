@@ -116,7 +116,10 @@ own() {
            information_schema.columns where table_schema = 'dbm' and
            table_name = 'audit' and column_name = 'note'), ' ',
            (select delete_rule from information_schema.referential_constraints
-           where constraint_schema = 'dbm' and table_name = 'pets'))
+           where constraint_schema = 'dbm' and table_name = 'pets'), ' ',
+           (select column_type from information_schema.columns where
+           table_schema = 'dbm' and table_name = 'audit' and
+           column_name = 'mood'))
            from information_schema.columns where table_schema = 'dbm'
            and table_name = 'audit' and column_name = 'id'" ;;
     sqlite3)
@@ -130,7 +133,7 @@ ownWanted() {
   case $driver in
     pg) echo "character varying(32) 1 small,large" ;;
     cockroachdb) echo "3 uuid kind,id" ;;
-    mysql) echo "int unsigned mediumtext RESTRICT" ;;
+    mysql) echo "int unsigned mediumtext RESTRICT enum('calm','Wild','it''s')" ;;
     sqlite3) echo "pets CASCADE 1" ;;
   esac
 }

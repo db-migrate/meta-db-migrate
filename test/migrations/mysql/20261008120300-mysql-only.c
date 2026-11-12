@@ -1,7 +1,7 @@
 /**
  * MySQL's own: table options, unsigned and sized text, a boolean that is a
- * TINYINT, a column restated whole, an index and a foreign key dropped by
- * MySQL's own statements.
+ * TINYINT, an enum keeping the case of its values, a column restated whole,
+ * an index and a foreign key dropped by MySQL's own statements.
  */
 #include <db_migrate.h>
 
@@ -13,6 +13,7 @@ static int up(migrator_t *db) {
            unsigned: true},
       note: {type: "text", length: 70000},
       flag: {type: "boolean", notNull: true, defaultValue: true},
+      mood: "enum('calm', 'Wild', 'it''s')",
       created: {type: "datetime", defaultValue: {special: "CURRENT_TIMESTAMP"},
                 comment: "when it happened"},
     },
