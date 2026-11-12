@@ -221,6 +221,27 @@ struct driver_t {
 
   int (*addMigrationRecord)(driver_t *self, const char *name);
   int (*deleteMigrationRecord)(driver_t *self, const char *name);
+
+  /* ---------------------------------------------------------- reserved */
+
+  /**
+   * Room for what comes later, so that it does not move anything.
+   *
+   * A driver puts driver_t first in a struct of its own, so a field added
+   * anywhere in here, even last, moves the driver's fields behind it, and a
+   * driver built against the older header writes into the new one. That is
+   * why ABI 2 had to be a new number. What is added from here on takes one
+   * of these slots instead, from the front, as a member of the same size - a
+   * function, a pointer, or a capability that fits in one - and the struct
+   * keeps its size and every offset.
+   *
+   * A slot is zero until something fills it: dbmDriverNew allocates the
+   * driver zeroed and, from the version that names a slot, puts the generic
+   * function there. A driver built before that never touches it, and so has
+   * the generic behaviour, which is what a driver that knows nothing about
+   * a new operation should have.
+   */
+  void *reserved[16];
 };
 
 /**

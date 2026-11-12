@@ -59,7 +59,8 @@
  *
  * Raised whenever such a type changes its layout or its meaning. The SBOM
  * of a release names it as db-migrate:abi. 2: driver_t's addIndex takes the
- * index's options as a document, and says which of them it has.
+ * index's options as a document, and says which of them it has; driver_t
+ * ends in reserved slots, which later additions take without a new number.
  */
 #define DBM_ABI 2
 
