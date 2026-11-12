@@ -55,17 +55,18 @@
  * headers of another number asks for a symbol the library does not define,
  * and the linker says so by name instead of the program misreading a struct:
  *
- *     undefined reference to `dbm_needs_abi_1'
+ *     undefined reference to `dbm_needs_abi_2'
  *
  * Raised whenever such a type changes its layout or its meaning. The SBOM
- * of a release names it as db-migrate:abi.
+ * of a release names it as db-migrate:abi. 2: driver_t's addIndex takes the
+ * index's options as a document, and says which of them it has.
  */
-#define DBM_ABI 1
+#define DBM_ABI 2
 
-extern const char dbm_needs_abi_1;
+extern const char dbm_needs_abi_2;
 
 __attribute__((used)) static const char *const dbmNeedsAbi__ =
-    &dbm_needs_abi_1;
+    &dbm_needs_abi_2;
 
 typedef struct driver_t driver_t;
 
@@ -172,6 +173,27 @@ int migrator_t__addIndex(migrator_t *self, const char *table, const char *name,
                          json_t columns);
 int migrator_t__addUniqueIndex(migrator_t *self, const char *table,
                                const char *name, json_t columns);
+
+/**
+ * An index with what it says besides its columns, node's addIndex with an
+ * options object - every key optional:
+ *
+ *   db->addIndexWith("files", "files_by_dir", ["dir", "name"],
+ *                    {unique: true, where: "deleted_at IS NULL",
+ *                     storing: ["size", "mime"]});
+ *
+ * - `unique`: as addUniqueIndex
+ * - `where`: a partial index; the predicate is SQL, written as it is
+ *   (PostgreSQL, CockroachDB, SQLite)
+ * - `storing`: columns kept in the index, read without the table - a
+ *   covering index: CockroachDB's STORING, PostgreSQL's INCLUDE (11 and up)
+ * - `inverted`: CockroachDB's INVERTED index
+ *
+ * A database that cannot say one of them refuses the index with a reason,
+ * as it refuses an option it does not know.
+ */
+int migrator_t__addIndexWith(migrator_t *self, const char *table,
+                             const char *name, json_t columns, json_t options);
 int migrator_t__removeIndex(migrator_t *self, const char *table,
                             const char *name);
 
@@ -280,6 +302,9 @@ int schema_adopt_t__addIndex(schema_adopt_t *self, const char *table,
                              const char *name, json_t columns);
 int schema_adopt_t__addUniqueIndex(schema_adopt_t *self, const char *table,
                                    const char *name, json_t columns);
+int schema_adopt_t__addIndexWith(schema_adopt_t *self, const char *table,
+                                 const char *name, json_t columns,
+                                 json_t options);
 int schema_adopt_t__addForeignKey(schema_adopt_t *self, const char *table,
                                   const char *referenced, const char *name,
                                   json_t mapping, json_t rules);
@@ -305,6 +330,15 @@ int schema_t__addIndex(schema_t *self, const char *table, const char *name,
                        json_t columns);
 int schema_t__addUniqueIndex(schema_t *self, const char *table,
                              const char *name, json_t columns);
+
+/**
+ * As migrator_t's addIndexWith. The options are learned as node 1.8.2 keeps
+ * them - `u`, `v` (inverted), `w` (where) - and the stored columns under `s`,
+ * so an index removed by a later migration, or with its table, comes back
+ * with all of them.
+ */
+int schema_t__addIndexWith(schema_t *self, const char *table, const char *name,
+                           json_t columns, json_t options);
 int schema_t__removeIndex(schema_t *self, const char *table, const char *name);
 int schema_t__addForeignKey(schema_t *self, const char *table,
                             const char *referenced, const char *name,

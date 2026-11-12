@@ -106,6 +106,31 @@ DBM_MIGRATION_V2_WITH(migrate, {release: "2.3.0", recovery: "rollback"})
 DBM_MIGRATION_DML_WITH(migrate, {background: true, blocking: true})
 ```
 
+### Indexes with options
+
+`db->addIndexWith(table, name, columns, options)` is node's addIndex with an
+options object, in v1 and v2 migrations and under `db->adopt()`:
+
+```c
+db->addIndexWith("files", "files_listing", ["dir_id", "name"],
+                 {unique: true, where: "deleted_at IS NULL",
+                  storing: ["size", "mime", "updated_at"]});
+```
+
+| Option | | pg | cockroachdb | mysql | sqlite3 |
+|---|---|---|---|---|---|
+| `unique` | as `addUniqueIndex` | yes | yes | yes | yes |
+| `where` | a partial index; the predicate is SQL, written as it is | yes | yes | – | yes |
+| `storing` | a covering index: columns kept in it, read without the table | `INCLUDE` (11 and up) | `STORING` | – | – |
+| `inverted` | an inverted index | – | yes | – | – |
+
+What a database cannot say is refused with a reason before anything is sent,
+and so is an option nobody knows. A v2 migration learns the options in node
+1.8.2's keys - `u`, `v`, `w` - and the stored columns under `s`, so undoing a
+`removeIndex` or a `dropTable` creates the index again with all of it, and
+node does the same with the state this one wrote, and the other way round.
+`storing` is not in node's drivers yet except db-migrate-cockroachdb's.
+
 ### Objects made outside v2 migrations
 
 `db->adopt()` declares a table, column, index or foreign key that a v1
@@ -468,6 +493,7 @@ test/options.sh               # --ignore-on-init, --log-level, dry runs
 test/static.sh                # build-app --static: glibc only, on bare Debian/Fedora
 test/embed.sh                 # dbmMigrateUp from a shared object with its own runtime
 test/recovery.sh              # v2 runs that die or fail halfway, resumed and rolled back
+test/indexes.sh               # addIndexWith: written, refused, learned, created again
 test/compat.sh                # moving a project from node db-migrate and back
 ```
 
@@ -514,7 +540,7 @@ another) and runs every suite on Ubuntu
 24.04, each in its own job: `run.sh` once per database (started with
 `docker run`, as at the top of `test/run.sh`), plus `options.sh`,
 `plugins.sh`, `static.sh`, `embed.sh`, `recovery.sh`, `adopt.sh`,
-`scopes.sh`, `seeds.sh`, `dml.sh`, `releases.sh`, `work.sh` and
+`indexes.sh`, `scopes.sh`, `seeds.sh`, `dml.sh`, `releases.sh`, `work.sh` and
 `compat.sh`. The last one moves a project from node
 db-migrate to this and back, against node-db-migrate and its pg driver as
 published (`NODE_DB_MIGRATE_REF`, `NODE_PG_REF`, default `master`).
@@ -556,7 +582,8 @@ are permissively licensed.
 ## Status
 
 - PostgreSQL, CockroachDB, MySQL, SQLite: createTable, dropTable,
-  renameTable, add/remove/rename/changeColumn, indexes, foreign keys, insert,
+  renameTable, add/remove/rename/changeColumn, indexes (unique, partial,
+  covering, inverted, as each database has them), foreign keys, insert,
   run/all/runSql, plus each database's own features (see table)
 - up/down/sync with destinations, reset, check, create (code, SQL, v2,
   templates), scopes, db:create/db:drop, node's options, development launcher

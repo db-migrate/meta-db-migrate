@@ -5,7 +5,10 @@
  * else is base. The overrides are the places PostgreSQL disagrees with the
  * generic SQL: a key that counts itself up is a type of its own (`SERIAL`)
  * rather than a constraint, a timestamp is `TIMESTAMP` rather than base's
- * `INTEGER`, and changing a column is three statements rather than one.
+ * `INTEGER`, and changing a column is three statements rather than one. An
+ * index may have a predicate (`where`), and the columns it stores
+ * (`storing`) are written as `INCLUDE`, PostgreSQL's word for CockroachDB's
+ * `STORING` since 11.
  *
  * The queries go through meta_pg.h, so they park the task they run in rather
  * than the thread - and from `main`, where there is no task, they wait the
@@ -554,6 +557,11 @@ driver_t *dbmPgConnect(json_t config, char *why, size_t room, const char *name,
 
   /* `delay` and `defaultValue` for a NOT NULL column v2 drops, as node's pg */
   self->columnStrategies = true;
+
+  /* an index with a predicate, and columns kept in it: INCLUDE, from 11 on,
+     what CockroachDB calls STORING */
+  self->partialIndexes = true;
+  self->indexStoring = "INCLUDE";
 
   if (strcmp(name, "cockroachdb") != 0)
     self->createDatabase = pgCreateDatabase;

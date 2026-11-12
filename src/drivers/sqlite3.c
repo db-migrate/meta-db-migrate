@@ -13,6 +13,8 @@
  * - a column cannot be changed in place; that is refused with the reason,
  *   because the honest version is a table rebuild, and a rebuild is a
  *   migration of its own rather than something to do behind somebody's back
+ * - an index may have a predicate (`where`); one that stores columns or is
+ *   inverted is refused
  *
  * SQLite runs in this process over a file, so there is nothing to wait on and
  * nothing to park. `{filename: "dev.db"}` in database.json, as for node, and
@@ -268,6 +270,7 @@ static driver_t *liteOpen(json_t config, char *why, size_t room) {
   self->close = liteClose;
 
   self->inlineForeignKeys = true;
+  self->partialIndexes = true;
   self->mapDataType = liteMapDataType;
   self->columnDef = liteColumnDef;
   self->columnConstraint = liteColumnConstraint;

@@ -1014,32 +1014,78 @@ int dbmBaseRenameColumn(driver_t *self, const char *table, const char *from,
   return dbmSend(self, &sql);
 }
 
+typedef const char *[] names_t;
+
+/** A name or a list of names, `"name"` being `["name"]`, onto `names`. */
+static void namesOf(json_t given, names_t *names) {
+
+  if (strcmp(given.kind(), "string") == 0)
+    names->push(given.text());
+  else
+    for (column in given)
+      names->push(column.text());
+}
+
 int dbmBaseAddIndex(driver_t *self, const char *table, const char *name,
-                    json_t columns, bool unique) {
+                    json_t columns, json_t options) {
 
   dbm_text_t sql = {0};
   defer sql.release();
 
-  const char *[] names;
+  names_t names;
   defer names.release();
 
-  /* `"name"` and `["name"]` are the same index */
-  if (strcmp(columns.kind(), "string") == 0)
-    names.push(columns.text());
-  else
-    for (column in columns)
-      names.push(column.text());
+  names_t stored;
+  defer stored.release();
+
+  namesOf(columns, &names);
 
   if (names.count == 0)
     return dbmFail(self, TEXT`index ${name} on ${table} with no columns`);
 
-  sql.put(unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+  /* what an index may say, refused where the database cannot say it */
+  if (!options.isNothing() && strcmp(options.kind(), "object") != 0)
+    return dbmFail(self, TEXT`index ${name} on ${table}: its options are an object - {unique, inverted, where, storing}`);
+
+  for (option in options)
+    if (!(option.keyOf() in {"unique", "inverted", "where", "storing"}))
+      return dbmFail(self, TEXT`index ${name} on ${table}: there is no index option "${option.keyOf()}", only unique, inverted, where and storing`);
+
+  bool unique = options.unique.truth();
+  bool inverted = options.inverted.truth();
+  const char *where = options.where.text();
+
+  namesOf(options.storing, &stored);
+
+  if (inverted && !self->invertedIndexes)
+    return dbmFail(self, TEXT`index ${name} on ${table}: ${self->name} has no inverted indexes`);
+
+  if (where[0] != '\0' && !self->partialIndexes)
+    return dbmFail(self, TEXT`index ${name} on ${table}: ${self->name} has no partial indexes (where)`);
+
+  if (stored.count > 0 && self->indexStoring == NULL)
+    return dbmFail(self, TEXT`index ${name} on ${table}: ${self->name} cannot store columns in an index (storing)`);
+
+  sql.put(unique ? "CREATE UNIQUE " : "CREATE ");
+  sql.put(inverted ? "INVERTED INDEX " : "INDEX ");
   self->quoteName(self, &sql, name);
   sql.put(" ON ");
   self->quoteName(self, &sql, table);
   sql.put(" (");
   putNames(self, &sql, names.items, names.count);
   sql.put(")");
+
+  if (stored.count > 0) {
+    sql.append(TEXT` ${self->indexStoring} (`);
+    putNames(self, &sql, stored.items, stored.count);
+    sql.put(")");
+  }
+
+  /* the predicate is SQL, written by the migration, as node's drivers take it */
+  if (where[0] != '\0') {
+    sql.put(" WHERE ");
+    sql.put(where);
+  }
 
   return dbmSend(self, &sql);
 }

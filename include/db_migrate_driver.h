@@ -117,6 +117,17 @@ struct driver_t {
    */
   bool inlineForeignKeys;
 
+  /**
+   * What an index may say besides its columns, asked by the generic
+   * `addIndex`, which refuses what the database does not have: a predicate
+   * (`where`), INVERTED, and columns stored in the index (`storing`) under
+   * the word written for them - CockroachDB's `STORING`, PostgreSQL's
+   * `INCLUDE`, NULL where there is none.
+   */
+  bool partialIndexes;
+  bool invertedIndexes;
+  const char *indexStoring;
+
   /* ------------------------------------------- what a driver must bring */
 
   /** One or more statements, nothing back. 0 when every one of them worked. */
@@ -179,8 +190,13 @@ struct driver_t {
   int (*changeColumn)(driver_t *self, const char *table, const char *column,
                       json_t spec);
 
+  /**
+   * `options` is an object - `{unique, inverted, where, storing}`, every key
+   * optional, `storing` a name or a list of them - or nothing for a plain
+   * index. `where` is SQL, written as it is.
+   */
   int (*addIndex)(driver_t *self, const char *table, const char *name,
-                  json_t columns, bool unique);
+                  json_t columns, json_t options);
   int (*removeIndex)(driver_t *self, const char *table, const char *name);
 
   int (*addForeignKey)(driver_t *self, const char *table,
@@ -261,7 +277,7 @@ int dbmBaseRemoveColumn(driver_t *self, const char *table, const char *column);
 int dbmBaseRenameColumn(driver_t *self, const char *table, const char *from,
                         const char *to);
 int dbmBaseAddIndex(driver_t *self, const char *table, const char *name,
-                    json_t columns, bool unique);
+                    json_t columns, json_t options);
 int dbmBaseRemoveIndex(driver_t *self, const char *table, const char *name);
 int dbmBaseAddForeignKey(driver_t *self, const char *table,
                          const char *referenced, const char *name,

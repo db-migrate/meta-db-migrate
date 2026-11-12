@@ -111,7 +111,6 @@ typedef struct {
   const char *other;
   json_t spec;
   json_t options;
-  bool unique;
 } step_t;
 
 /* ------------------------------------------------------------------ */
@@ -636,6 +635,18 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
 
   case ACTION_ADD_INDEX: {
 
+    json_t options = step->options;
+    json_t storing = options.storing;
+
+    /* the stored columns, a name or a list of them, kept as a list */
+    json_t stored = arrayIn(i);
+
+    if (strcmp(storing.kind(), "string") == 0)
+      stored.push(storing.text());
+    else
+      for (column in storing)
+        stored.push(column.text());
+
     for (column in step->spec) {
 
       char name[256];
@@ -646,13 +657,29 @@ static int learn(schema_t *self, dbm_action_t action, step_t *step) {
         return -1;
     }
 
+    /* columns of the table as well, or the index could not come back */
+    for (column in stored)
+      if (needColumn(self, t, column.text()))
+        return -1;
+
     json_t index = objectIn(i);
 
     index.t = t;
     index.c = step->spec;
 
-    if (step->unique)
+    /* the options as node 1.8.2 keeps them, and the stored columns under
+       `s`: what creates the index again exactly as it was */
+    if (options.unique.truth())
       index.u = true;
+
+    if (options.inverted.truth())
+      index.v = true;
+
+    if (options.where.text()[0] != '\0')
+      index.w = options.where.text();
+
+    if (stored.count() > 0)
+      place(index, "s", stored);
 
     place(child(i, t), step->name, index);
     const char *args[] = {t, step->name};
@@ -818,7 +845,7 @@ static int send(schema_t *self, dbm_action_t action, step_t *step) {
       columns.push(name);
     }
 
-    answer = driver->addIndex(driver, t, step->name, columns, step->unique);
+    answer = driver->addIndex(driver, t, step->name, columns, step->options);
 
     /* a driver is called through a pointer, which meta reads as keeping */
     columns.release();
@@ -1040,10 +1067,11 @@ int schema_t__changeColumn(schema_t *self, const char *table,
   return perform(self, ACTION_CHANGE_COLUMN, &step);
 }
 
-static int addIndex(schema_t *self, const char *table, const char *name,
-                    json_t columns, bool unique) {
+int schema_t__addIndexWith(schema_t *self, const char *table, const char *name,
+                           json_t columns, json_t options) {
 
-  step_t step = {.table = table, .name = name, .unique = unique};
+  step_t step = {.table = table, .name = name,
+                 .options = copyIn(schemaOf(self), options)};
 
   /* `"name"` and `["name"]` are the same index, kept as the second */
   if (strcmp(columns.kind(), "string") == 0) {
@@ -1058,12 +1086,12 @@ static int addIndex(schema_t *self, const char *table, const char *name,
 
 int schema_t__addIndex(schema_t *self, const char *table, const char *name,
                        json_t columns) {
-  return addIndex(self, table, name, columns, false);
+  return self->addIndexWith(table, name, columns, {});
 }
 
 int schema_t__addUniqueIndex(schema_t *self, const char *table,
                              const char *name, json_t columns) {
-  return addIndex(self, table, name, columns, true);
+  return self->addIndexWith(table, name, columns, {unique: true});
 }
 
 int schema_t__removeIndex(schema_t *self, const char *table, const char *name) {
@@ -1344,6 +1372,20 @@ int schema_adopt_t__addUniqueIndex(schema_adopt_t *self, const char *table,
                       schema_t__addUniqueIndex(self->db, table, name, columns));
 }
 
+int schema_adopt_t__addIndexWith(schema_adopt_t *self, const char *table,
+                                 const char *name, json_t columns,
+                                 json_t options) {
+
+  if (self->db->failed)
+    return -1;
+
+  if (!absent(schemaOf(self->db).i[table][name]))
+    return known(self->db, TEXT`addIndex("${table}", "${name}")`);
+
+  return DBM_ADOPTING(self->db, schema_t__addIndexWith(self->db, table, name,
+                                                       columns, options));
+}
+
 int schema_adopt_t__addForeignKey(schema_adopt_t *self, const char *table,
                                   const char *referenced, const char *name,
                                   json_t mapping, json_t rules) {
@@ -1370,6 +1412,29 @@ static int undo(schema_t *self, dbm_action_t action, step_t *step) {
     return -1;
 
   return send(self, action, step);
+}
+
+/**
+ * The options an index is created again with, from what was kept of it -
+ * `u`, `v`, `w` and `s` - as node's indexOptions hands them to its driver.
+ */
+static json_t indexOptionsOf(json_t beside, json_t index) {
+
+  json_t options = objectIn(beside);
+
+  if (index.u.truth())
+    options.unique = true;
+
+  if (index.v.truth())
+    options.inverted = true;
+
+  if (!absent(index.w))
+    options.where = index.w;
+
+  if (!absent(index.s))
+    options.storing = index.s;
+
+  return options;
 }
 
 /**
@@ -1403,7 +1468,7 @@ static int rebuildTable(schema_t *self, const char *t) {
   for (index in child(kept, "i")[t]) {
 
     step_t step = {.table = t, .name = index.keyOf(), .spec = index.c,
-                   .unique = index.u.truth()};
+                   .options = indexOptionsOf(kept, index)};
 
     if (undo(self, ACTION_ADD_INDEX, &step))
       return -1;
@@ -1508,7 +1573,7 @@ static int undoEntry(schema_t *self, json_t entry) {
     }
 
     step.spec = index.c;
-    step.unique = index.u.truth();
+    step.options = indexOptionsOf(kept, index);
     return undo(self, action, &step);
   }
 

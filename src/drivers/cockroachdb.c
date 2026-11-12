@@ -14,7 +14,9 @@
  * - a key that counts itself up may be a UUID, filled by gen_random_uuid()
  * - `CURRENT_TIMESTAMP()` and `NOW()` are function calls, and a column may
  *   say what it becomes `ON UPDATE`
- * - an index belongs to its table: `DROP INDEX "t"@"i"`
+ * - an index belongs to its table: `DROP INDEX "t"@"i"`, it keeps the
+ *   columns it stores with `STORING` rather than `INCLUDE`, and it may be
+ *   `INVERTED`
  * - a table may expire its rows: `{columns: ..., expireAfter: "30 days"}`
  * - `changePrimaryKey`, which PostgreSQL has no single statement for
  *
@@ -333,6 +335,10 @@ static driver_t *crdbOpen(json_t config, char *why, size_t room) {
   self->removeIndex = crdbRemoveIndex;
   self->changeColumn = crdbChangeColumn;
   self->tableOptions = crdbTableOptions;
+
+  /* a covering index stores its columns, and an index may be INVERTED */
+  self->indexStoring = "STORING";
+  self->invertedIndexes = true;
 
   return self;
 }

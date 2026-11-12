@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         suite: [pg, cockroachdb, mysql, sqlite3, options, plugins, static, embed,
-                recovery, adopt, scopes, seeds, dml, releases, work]
+                recovery, adopt, indexes, scopes, seeds, dml, releases, work]
     steps:
       - uses: actions/checkout@v7
 

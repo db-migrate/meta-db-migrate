@@ -81,16 +81,20 @@ int migrator_t__changeColumn(migrator_t *self, const char *table,
 
 int migrator_t__addIndex(migrator_t *self, const char *table, const char *name,
                          json_t columns) {
-  if (blocked(self)) return -1;
-  return settle(self, self->driver->addIndex(self->driver, table, name,
-                                             columns, false));
+  return self->addIndexWith(table, name, columns, {});
 }
 
 int migrator_t__addUniqueIndex(migrator_t *self, const char *table,
                                const char *name, json_t columns) {
+  return self->addIndexWith(table, name, columns, {unique: true});
+}
+
+int migrator_t__addIndexWith(migrator_t *self, const char *table,
+                             const char *name, json_t columns,
+                             json_t options) {
   if (blocked(self)) return -1;
   return settle(self, self->driver->addIndex(self->driver, table, name,
-                                             columns, true));
+                                             columns, options));
 }
 
 int migrator_t__removeIndex(migrator_t *self, const char *table,
@@ -420,7 +424,7 @@ void dbmRegisterLazily(const char *as, const char *file, dbm_load_t load) {
 }
 
 /** What every object built against these headers asks for, see DBM_ABI. */
-const char dbm_needs_abi_1 = DBM_ABI;
+const char dbm_needs_abi_2 = DBM_ABI;
 
 /** The ones that could not be loaded, said once and not tried again. */
 static char *[] unloadable;

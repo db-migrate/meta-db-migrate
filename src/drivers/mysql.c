@@ -13,6 +13,8 @@
  * - `changeColumn` restates the whole column, which is what MySQL's CHANGE
  *   COLUMN takes, and an index and a foreign key are dropped by their own
  *   statements
+ * - an index has no predicate, stores no columns and is not inverted: an
+ *   index asking for one of them is refused
  *
  * And one thing no driver can change: MySQL commits before every piece of
  * DDL, so a migration that fails halfway keeps the DDL it already ran. The

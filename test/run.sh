@@ -135,6 +135,34 @@ ownWanted() {
   esac
 }
 
+# an index made with options, removed by the next v2 migration, comes back
+# with them when that is undone: what the database says it is, and what the
+# state learned of it in node's keys - u, w, v, and s for the stored columns
+indexes() {
+  case $driver in
+    pg)
+      sql "select indexdef from pg_indexes where indexname = 'v2_kennels_cover'" ;;
+    cockroachdb)
+      sql "select string_agg(indexdef, '; ' order by indexname) from pg_indexes
+           where indexname like 'v2_kennels_%' and indexname != 'v2_kennels_pkey'
+           and indexname != 'v2_kennels_name_idx'" ;;
+  esac
+}
+
+indexesWanted() {
+  case $driver in
+    pg) echo "CREATE UNIQUE INDEX v2_kennels_cover ON public.v2_kennels USING btree (name) INCLUDE (capacity) WHERE (capacity > 0)" ;;
+    cockroachdb) echo "CREATE UNIQUE INDEX v2_kennels_cover ON dbm.public.v2_kennels USING btree (name ASC) STORING (capacity, traits) WHERE (capacity > 0); CREATE INDEX v2_kennels_traits ON dbm.public.v2_kennels USING gin (traits)" ;;
+  esac
+}
+
+indexesLearned() {
+  case $driver in
+    pg) echo '{"v2_kennels":{"v2_kennels_cover":{"t":"v2_kennels","c":["name"],"u":true,"w":"capacity > 0","s":["capacity"]}}}' ;;
+    cockroachdb) echo '{"v2_kennels":{"v2_kennels_traits":{"t":"v2_kennels","c":["traits"],"v":true},"v2_kennels_cover":{"t":"v2_kennels","c":["name"],"u":true,"w":"capacity > 0","s":["capacity","traits"]}}}' ;;
+  esac
+}
+
 # SQLite's own migration renames it, to show that it can
 slugColumn() {
   case $driver in
@@ -228,6 +256,17 @@ for driver in $drivers; do
   expect "a migration in SQL, quotes and all" "it's; \"quoted\" fine" \
     "$(sql "select body from notes")"
   expect "and what only $driver does" "$(ownWanted)" "$(own)"
+
+  if [ -n "$(indexesWanted)" ]; then
+    expect "an index's options are learned, the stored columns as s" \
+      "$(indexesLearned)" \
+      "$(sql "select value from migrations_state where $(keyColumn) = '20261008120700-v2-uncover'" | sed 's/^{"i":\(.*\),"c":{},"f":{},"s":\[.*$/\1/')"
+    "$app" down -e "$driver" -c 1 >/dev/null 2>&1
+    expect "an index removed comes back with its options" \
+      "$(indexesWanted)" "$(indexes)"
+    "$app" up -e "$driver" >/dev/null 2>&1
+    expect "and goes again" "" "$(indexes)"
+  fi
 
   # fix: a v2 migration's lost state rebuilt from the migration itself
   sql "delete from migrations_state where $(keyColumn) = '20261008120500-v2-kennels'" >/dev/null
