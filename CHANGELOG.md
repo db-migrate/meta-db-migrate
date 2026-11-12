@@ -1,3 +1,42 @@
+## 0.7.0 (2026-11-12)
+
+What node db-migrate 1.8.2, db-migrate-cockroachdb 5.10.0,
+db-migrate-base 2.5.1 and db-migrate-mysql 3.2.1 changed, followed, and
+covering indexes besides. The ABI is 2.
+
+### Features
+
+* **index:** `db->addIndexWith(table, name, columns, options)`, node's
+  addIndex with an options object, on v1 and v2 migrations and under
+  `db->adopt()`: `unique`, `where` for a partial index (PostgreSQL,
+  CockroachDB, SQLite), `inverted` (CockroachDB) and `storing`, the
+  columns a covering index keeps - CockroachDB's `STORING`, PostgreSQL's
+  `INCLUDE`. What a database cannot say is refused with a reason, and so
+  is an option nobody knows
+* **v2:** an index's options are learned as node 1.8.2 keeps them, `u`,
+  `v` and `w`, and its stored columns as a list under `s`, so undoing a
+  `removeIndex` or a `dropTable` creates it again with all of them, from
+  the state either tool wrote
+
+### Bug Fixes
+
+* **base:** a type nobody recognised keeps its quoted parts as they are,
+  `enum('calm', 'Wild')` rather than `ENUM(CALM, WILD)`
+* **mysql:** a table's character set is written before its collation,
+  which older servers otherwise reset to the character set's default
+
+### Breaking changes
+
+* **driver:** `driver_t`'s `addIndex` takes the index's options as a
+  document instead of `bool unique`, and `partialIndexes`,
+  `invertedIndexes` and `indexStoring` say which of them a database has;
+  `DBM_ABI` is 2, so an object built against 0.6 headers fails to link
+  (`dbm_needs_abi_1`) instead of calling a driver the wrong way
+* **driver:** `driver_t` ends in sixteen reserved slots. A driver puts
+  `driver_t` first in a struct of its own, so any field added to it moved
+  the driver's fields; what is added later takes a reserved slot instead,
+  and the ABI stays 2
+
 ## 0.6.2 (2026-10-30)
 
 The same db-migrate, written for meta's `json_t` as it is since `90db752`;
